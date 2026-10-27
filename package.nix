@@ -9,7 +9,10 @@
   libxkbcommon,
   vulkan-loader,
   libGL,
-  ffmpeg,
+  libx11,
+  libxcursor,
+  libxi,
+  libxcb,
 }:
 
 rustPlatform.buildRustPackage {
@@ -23,8 +26,8 @@ rustPlatform.buildRustPackage {
         ./Cargo.toml
         ./Cargo.lock
         ./src
+        ./assets
       ]
-      ++ lib.optional (builtins.pathExists ./assets) ./assets
     );
   };
 
@@ -47,7 +50,12 @@ rustPlatform.buildRustPackage {
 
   doCheck = true;
 
-  # winit and wgpu dlopen the wayland, xkb, vulkan and gl libraries
+  postInstall = ''
+    install -Dm644 assets/camera-app.svg \
+      $out/share/icons/hicolor/scalable/apps/camera-app.svg
+  '';
+
+  # winit and wgpu dlopen the wayland, x11, xkb, vulkan and gl libraries
   # instead of linking them, so the wrapper has to point at them
   postFixup = ''
     wrapProgram $out/bin/camera-app \
@@ -57,9 +65,12 @@ rustPlatform.buildRustPackage {
           libxkbcommon
           vulkan-loader
           libGL
+          libx11
+          libxcursor
+          libxi
+          libxcb
         ]
-      } \
-      --prefix PATH : ${lib.makeBinPath [ ffmpeg ]}
+      }
   '';
 
   desktopItems = [
@@ -67,7 +78,7 @@ rustPlatform.buildRustPackage {
       name = "camera-app";
       desktopName = "Camera App";
       exec = "camera-app";
-      icon = "camera-web";
+      icon = "camera-app";
       categories = [
         "Utility"
         "Video"

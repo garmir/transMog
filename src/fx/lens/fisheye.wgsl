@@ -6,7 +6,8 @@
 //   equisolid     r' = tan(2 asin(r f / 2)) / f
 //   stereographic r' = tan(2 atan(r f / 2)) / f
 // with f = 1.6 strength + 1e-4, so strength 0 is the identity for all
-// four. lookups outside the source come back black.
+// four. lookups outside the source come back black, and so do rays whose
+// angle reaches pi/2, where tan blows up and then wraps back to positive.
 
 struct Params {
     strength: f32,
@@ -25,24 +26,33 @@ const BARREL: u32 = 0u;
 const EQUIDISTANT: u32 = 1u;
 const EQUISOLID: u32 = 2u;
 const STEREOGRAPHIC: u32 = 3u;
+const HALF_PI: f32 = 1.5707963;
 
+// the source radius, or -1 when the ray leaves the hemisphere. the sign
+// of tan is no test for that: past pi it is positive again, and
+// tan(2 asin(1)) is a tiny number of driver-dependent sign.
 fn remap(r: f32) -> f32 {
     let f = params.strength * 1.6 + 1e-4;
+    var theta = 0.0;
     switch params.projection {
         case EQUIDISTANT: {
-            return tan(r * f) / f;
+            theta = r * f;
         }
         case EQUISOLID: {
-            return tan(2.0 * asin(clamp(r * f * 0.5, -1.0, 1.0))) / f;
+            theta = 2.0 * asin(min(r * f * 0.5, 1.0));
         }
         case STEREOGRAPHIC: {
-            return tan(2.0 * atan(r * f * 0.5)) / f;
+            theta = 2.0 * atan(r * f * 0.5);
         }
         default: {
             let k1 = params.strength * 2.0;
             return r * (1.0 + k1 * r * r);
         }
     }
+    if (theta >= HALF_PI - 1e-3) {
+        return -1.0;
+    }
+    return tan(theta) / f;
 }
 
 @fragment

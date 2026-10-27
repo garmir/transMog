@@ -13,6 +13,10 @@
         libxkbcommon
         vulkan-loader
         libGL
+        libx11
+        libxcursor
+        libxi
+        libxcb
       ];
     in
     {

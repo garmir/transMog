@@ -175,6 +175,20 @@ struct Source {
     height: u32,
     layout: PixelLayout,
     seq: Option<u64>,
+    /// row-padded staging copy, kept for sizes whose row is not a
+    /// multiple of the copy alignment so no upload allocates
+    padded: Vec<u8>,
+}
+
+/// bytes per texture row and the row pitch write_texture needs
+fn row_layout(layout: PixelLayout, width: u32) -> (u32, u32) {
+    let bytes_per_row = match layout {
+        PixelLayout::Yuyv => width * 2,
+        PixelLayout::Rgba8 => width * 4,
+    };
+    let padded_row = bytes_per_row.div_ceil(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT)
+        * wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
+    (bytes_per_row, padded_row)
 }
 
 /// source texture, ping-pong targets and the pass stack
@@ -253,10 +267,11 @@ impl Renderer {
             self.recreate(device, frame);
         }
         let source = self.source.as_mut().expect("recreate sets the source");
-        let (texel_width, bytes_per_row) = match frame.layout {
-            PixelLayout::Yuyv => (frame.width / 2, frame.width * 2),
-            PixelLayout::Rgba8 => (frame.width, frame.width * 4),
+        let texel_width = match frame.layout {
+            PixelLayout::Yuyv => frame.width / 2,
+            PixelLayout::Rgba8 => frame.width,
         };
+        let (bytes_per_row, padded_row) = row_layout(frame.layout, frame.width);
         let rows = frame.height as usize;
         let row = bytes_per_row as usize;
         if frame.data.len() < row * rows {
@@ -267,21 +282,17 @@ impl Renderer {
             );
             return;
         }
-        let padded_row = bytes_per_row.div_ceil(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT)
-            * wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
-        let padded;
         let data: &[u8] = if padded_row == bytes_per_row {
             &frame.data[..row * rows]
         } else {
-            let mut buf = vec![0u8; padded_row as usize * rows];
-            for (dst, src) in buf
+            for (dst, src) in source
+                .padded
                 .chunks_exact_mut(padded_row as usize)
                 .zip(frame.data.chunks_exact(row))
             {
                 dst[..row].copy_from_slice(src);
             }
-            padded = buf;
-            &padded
+            &source.padded
         };
         queue.write_texture(
             source.texture.as_image_copy(),
@@ -321,6 +332,12 @@ impl Renderer {
         });
         let view = texture.create_view(&Default::default());
         let bind_group = create_input_bind_group(device, &self.input_layout, &view, &self.sampler);
+        let (bytes_per_row, padded_row) = row_layout(frame.layout, frame.width);
+        let padded = if padded_row == bytes_per_row {
+            Vec::new()
+        } else {
+            vec![0u8; padded_row as usize * frame.height as usize]
+        };
         self.source = Some(Source {
             texture,
             bind_group,
@@ -328,6 +345,7 @@ impl Renderer {
             height: frame.height,
             layout: frame.layout,
             seq: None,
+            padded,
         });
         let target = |label| {
             let texture = device.create_texture(&wgpu::TextureDescriptor {
@@ -404,6 +422,16 @@ impl Renderer {
 
     pub fn output_texture(&self) -> Option<&wgpu::Texture> {
         self.targets.as_ref().map(|t| &t[self.output].texture)
+    }
+
+    /// both ping-pong targets, so a viewer can bind each once and pick
+    /// by output_index() after every render
+    pub fn target_views(&self) -> Option<[&wgpu::TextureView; 2]> {
+        self.targets.as_ref().map(|t| [&t[0].view, &t[1].view])
+    }
+
+    pub fn output_index(&self) -> usize {
+        self.output
     }
 
     pub fn output_size(&self) -> Option<(u32, u32)> {

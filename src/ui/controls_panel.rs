@@ -53,7 +53,9 @@ fn show_control(ui: &mut egui::Ui, info: &ControlInfo, actions: &mut Vec<Action>
                 let slider = egui::Slider::new(&mut value, *min..=*max)
                     .step_by((*step).max(1) as f64)
                     .text(&info.name);
-                if ui.add(slider).changed() {
+                // changed() also fires when the slider snaps a value the
+                // driver reported off its grid, which would loop forever
+                if ui.add(slider).changed() && value != info.value {
                     actions.push(Action::Set(info.id, value));
                 }
             }

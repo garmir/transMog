@@ -71,7 +71,9 @@ fn describe_device(path: &Path) -> Result<Option<DeviceInfo>> {
     if !caps.capabilities.contains(CapFlags::VIDEO_CAPTURE) {
         return Ok(None);
     }
-    // metadata nodes advertise VIDEO_CAPTURE but offer no pixel formats
+    // caps.capabilities is device_caps, so metadata nodes are already gone
+    // here; this only drops a driver that sets VIDEO_CAPTURE and offers no
+    // pixel format at all
     if device.enum_formats().map(|f| f.is_empty()).unwrap_or(true) {
         return Ok(None);
     }
@@ -214,24 +216,41 @@ pub struct CaptureConfig {
     pub fps: u32,
 }
 
+type Wake = Box<dyn Fn() + Send + Sync>;
+
 /// state shared between the capture thread and its handle
 struct Shared {
     latest: Mutex<Option<Arc<Frame>>>,
     seq: AtomicU64,
     stamps: Mutex<VecDeque<Instant>>,
     stop: AtomicBool,
+    wake: Mutex<Option<Wake>>,
+    /// why the worker returned, set before it does
+    error: Mutex<Option<String>>,
 }
 
 const FPS_WINDOW: Duration = Duration::from_secs(1);
 
 impl Shared {
-    fn publish(&self, mut frame: Frame) {
+    /// hands back the frame it replaced, so the worker can drop or
+    /// recycle it outside the lock
+    fn publish(&self, mut frame: Frame) -> Option<Arc<Frame>> {
         let now = frame.received;
         frame.seq = self.seq.fetch_add(1, Ordering::Relaxed) + 1;
-        *self.latest.lock() = Some(Arc::new(frame));
-        let mut stamps = self.stamps.lock();
-        stamps.push_back(now);
-        prune_stamps(&mut stamps, now);
+        let previous = self.latest.lock().replace(Arc::new(frame));
+        {
+            let mut stamps = self.stamps.lock();
+            stamps.push_back(now);
+            prune_stamps(&mut stamps, now);
+        }
+        if let Some(wake) = self.wake.lock().as_ref() {
+            wake();
+        }
+        previous
+    }
+
+    fn fail(&self, message: String) {
+        *self.error.lock() = Some(message);
     }
 }
 
@@ -299,6 +318,8 @@ impl Capture {
             seq: AtomicU64::new(0),
             stamps: Mutex::new(VecDeque::new()),
             stop: AtomicBool::new(false),
+            wake: Mutex::new(None),
+            error: Mutex::new(None),
         });
 
         let worker = worker::Worker {
@@ -335,6 +356,23 @@ impl Capture {
 
     pub fn config(&self) -> &CaptureConfig {
         &self.config
+    }
+
+    /// called from the capture thread after every published frame
+    pub fn set_wake(&self, wake: impl Fn() + Send + Sync + 'static) {
+        *self.shared.wake.lock() = Some(Box::new(wake));
+    }
+
+    /// why the capture thread exited, once it has
+    pub fn finished(&self) -> Option<String> {
+        let done = self.thread.as_ref().is_none_or(JoinHandle::is_finished);
+        done.then(|| {
+            self.shared
+                .error
+                .lock()
+                .clone()
+                .unwrap_or_else(|| "capture thread exited".into())
+        })
     }
 }
 

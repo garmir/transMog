@@ -19,6 +19,7 @@ pub(crate) struct Selection {
 }
 
 pub struct App {
+    ctx: egui::Context,
     devices: Vec<DeviceInfo>,
     selected_device: Option<usize>,
     formats: Vec<FormatInfo>,
@@ -35,6 +36,7 @@ impl App {
     pub fn new(cc: &eframe::CreationContext) -> App {
         let preview = cc.wgpu_render_state.as_ref().map(preview::Preview::new);
         let mut app = App {
+            ctx: cc.egui_ctx.clone(),
             devices: Vec::new(),
             selected_device: None,
             formats: Vec::new(),
@@ -140,18 +142,15 @@ impl App {
             preview.reset();
         }
         match Capture::start(cfg.clone()) {
-            Ok(capture) => self.capture = Some(capture),
+            Ok(capture) => {
+                let ctx = self.ctx.clone();
+                capture.set_wake(move || ctx.request_repaint());
+                self.capture = Some(capture);
+            }
             Err(e) => {
                 self.status = format!("start {}: {e:#}", cfg.path.display());
                 return;
             }
-        }
-        match Controls::open(&cfg.path) {
-            Ok(controls) => {
-                self.controls = Some(controls);
-                self.query_controls();
-            }
-            Err(e) => self.status = format!("controls {}: {e:#}", cfg.path.display()),
         }
         self.status = format!(
             "capturing {:?} {}x{}@{} from {}",
@@ -161,6 +160,13 @@ impl App {
             cfg.fps,
             cfg.path.display()
         );
+        match Controls::open(&cfg.path) {
+            Ok(controls) => {
+                self.controls = Some(controls);
+                self.query_controls();
+            }
+            Err(e) => self.status += &format!("; no controls: {e:#}"),
+        }
     }
 
     fn stop(&mut self) {
@@ -214,6 +220,11 @@ impl App {
                             .show(ui, |ui| {
                                 if let Some(preview) = &mut self.preview {
                                     fx_panel::show(ui, preview.passes_mut());
+                                    // Pass::ui reports no change, so any input
+                                    // that can edit a widget counts as one
+                                    if edited_this_frame(ui.ctx()) {
+                                        preview.invalidate();
+                                    }
                                 } else {
                                     ui.weak("no renderer");
                                 }
@@ -246,10 +257,34 @@ impl App {
     }
 }
 
+/// pointer buttons, keys, text, wheel and touch; a bare pointer move
+/// edits nothing
+fn edited_this_frame(ctx: &egui::Context) -> bool {
+    ctx.input(|i| {
+        i.pointer.any_down()
+            || i.events.iter().any(|e| {
+                !matches!(
+                    e,
+                    egui::Event::PointerMoved(_)
+                        | egui::Event::MouseMoved(_)
+                        | egui::Event::PointerGone
+                        | egui::Event::ModifiersChanged(_)
+                        | egui::Event::WindowFocused(_)
+                )
+            })
+    })
+}
+
 impl eframe::App for App {
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
+        if let Some(reason) = self.capture.as_ref().and_then(Capture::finished) {
+            self.stop();
+            self.status = format!("capture ended: {reason}");
+        }
         if self.capture.is_some() {
-            ui.ctx().request_repaint();
+            // frames wake the ui through Capture::set_wake; this tick keeps
+            // the fps readout and the control refresh alive when they stop
+            ui.ctx().request_repaint_after(CONTROL_REFRESH);
         }
         if self.controls.is_some() && self.controls_queried.elapsed() >= CONTROL_REFRESH {
             self.query_controls();

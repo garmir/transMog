@@ -9,18 +9,22 @@ pub(crate) enum Event {
     Toggle,
 }
 
-/// mjpeg 1280x720 at 30 first, then the largest yuyv size that offers
-/// 30 fps, then whatever comes first
-pub(crate) fn preferred_selection(formats: &[FormatInfo]) -> Selection {
-    let with_30 = |fps: &[u32]| fps.iter().position(|&f| f == 30);
+/// one usb 2 isochronous endpoint moves at most 3072 bytes per 125 us
+/// microframe, and yuyv is uncompressed, so a yuyv mode above this rate
+/// is delivered at a fraction of its advertised fps
+const USB2_ISO_BYTES_PER_SECOND: u64 = 3072 * 8000;
 
+/// mjpeg 1280x720 at 30 first, then the yuyv mode with the highest fps
+/// and then the largest area whose byte rate fits usb 2, then whatever
+/// comes first
+pub(crate) fn preferred_selection(formats: &[FormatInfo]) -> Selection {
     for (fi, format) in formats.iter().enumerate() {
         if format.format != SourceFormat::Mjpeg {
             continue;
         }
         for (si, size) in format.sizes.iter().enumerate() {
             if size.width == 1280 && size.height == 720 {
-                if let Some(fps) = with_30(&size.fps) {
+                if let Some(fps) = size.fps.iter().position(|&f| f == 30) {
                     return Selection {
                         format: fi,
                         size: si,
@@ -31,25 +35,28 @@ pub(crate) fn preferred_selection(formats: &[FormatInfo]) -> Selection {
         }
     }
 
-    let mut best: Option<(u64, Selection)> = None;
+    let mut best: Option<((u32, u64), Selection)> = None;
     for (fi, format) in formats.iter().enumerate() {
         if format.format != SourceFormat::Yuyv {
             continue;
         }
         for (si, size) in format.sizes.iter().enumerate() {
-            let Some(fps) = with_30(&size.fps) else {
-                continue;
-            };
             let area = u64::from(size.width) * u64::from(size.height);
-            if best.is_none_or(|(a, _)| area > a) {
-                best = Some((
-                    area,
-                    Selection {
-                        format: fi,
-                        size: si,
-                        fps,
-                    },
-                ));
+            for (fpsi, &fps) in size.fps.iter().enumerate() {
+                if area * 2 * u64::from(fps) > USB2_ISO_BYTES_PER_SECOND {
+                    continue;
+                }
+                let key = (fps, area);
+                if best.is_none_or(|(k, _)| key > k) {
+                    best = Some((
+                        key,
+                        Selection {
+                            format: fi,
+                            size: si,
+                            fps: fpsi,
+                        },
+                    ));
+                }
             }
         }
     }
@@ -186,4 +193,74 @@ pub(crate) fn show_top_bar(ui: &mut egui::Ui, app: &App) -> Option<Event> {
         }
     });
     event
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::capture::FrameSize;
+
+    fn size(width: u32, height: u32, fps: &[u32]) -> FrameSize {
+        FrameSize {
+            width,
+            height,
+            fps: fps.to_vec(),
+        }
+    }
+
+    /// the built-in camera's yuyv table: 1600x1200@30 is advertised but
+    /// arrives at under 5 fps, 640x480@30 is the fastest mode that fits
+    #[test]
+    fn yuyv_only_camera_picks_a_mode_usb2_can_carry() {
+        let formats = vec![FormatInfo {
+            format: SourceFormat::Yuyv,
+            sizes: vec![
+                size(1600, 1200, &[30]),
+                size(1280, 720, &[30, 25, 20, 15]),
+                size(640, 480, &[30]),
+                size(352, 288, &[30]),
+                size(320, 240, &[30]),
+                size(800, 600, &[15]),
+            ],
+        }];
+        assert_eq!(
+            preferred_selection(&formats),
+            Selection {
+                format: 0,
+                size: 2,
+                fps: 0
+            }
+        );
+    }
+
+    #[test]
+    fn mjpeg_720p30_wins_over_yuyv() {
+        let formats = vec![
+            FormatInfo {
+                format: SourceFormat::Yuyv,
+                sizes: vec![size(640, 480, &[30])],
+            },
+            FormatInfo {
+                format: SourceFormat::Mjpeg,
+                sizes: vec![size(1920, 1080, &[30]), size(1280, 720, &[30, 24])],
+            },
+        ];
+        assert_eq!(
+            preferred_selection(&formats),
+            Selection {
+                format: 1,
+                size: 1,
+                fps: 0
+            }
+        );
+    }
+
+    #[test]
+    fn nothing_fitting_falls_back_to_the_first_entry() {
+        let formats = vec![FormatInfo {
+            format: SourceFormat::Yuyv,
+            sizes: vec![size(1920, 1080, &[30])],
+        }];
+        assert_eq!(preferred_selection(&formats), Selection::default());
+    }
 }

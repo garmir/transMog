@@ -20,6 +20,9 @@ const BUFFER_COUNT: u32 = 4;
 const POLL_TIMEOUT: Duration = Duration::from_millis(500);
 const RETRY_DELAY: Duration = Duration::from_millis(100);
 const ENODEV: i32 = 19;
+// the ui holds at most one previous frame, so two spare buffers keep the
+// steady state free of multi-megabyte allocations
+const SPARE_BUFFERS: usize = 2;
 
 pub(super) struct Worker {
     pub device: Device,
@@ -30,50 +33,63 @@ pub(super) struct Worker {
 }
 
 enum Recovery {
-    Retry,
+    /// the dequeue timed out or was interrupted; every buffer is still
+    /// queued, so one hand dequeue restores the state next() expects
+    Dequeue,
+    /// the queue, start or dequeue ioctl failed and the buffer state is
+    /// unknown, so the stream is torn down and mapped again
+    Restart,
     Stop,
 }
 
 impl Worker {
     pub(super) fn run(self) {
-        let mut stream = match Stream::with_buffers(&self.device, Type::VideoCapture, BUFFER_COUNT)
-        {
-            Ok(s) => s,
-            Err(e) => {
-                error!("cannot map capture buffers: {e}");
-                return;
-            }
-        };
-        stream.set_timeout(POLL_TIMEOUT);
-
-        while !self.stopped() {
-            let err = match stream.next() {
-                Ok((buf, meta)) => {
-                    let used = (meta.bytesused as usize).min(buf.len());
-                    if let Some(frame) = self.build_frame(&buf[..used]) {
-                        self.shared.publish(frame);
-                    }
-                    continue;
-                }
-                Err(e) => e,
-            };
-            if let Recovery::Stop = classify(&err, "capture") {
-                return;
-            }
-            // next() queues the last dequeued buffer before it dequeues the
-            // next one, so after a failed dequeue every buffer is queued and
-            // a second next() would queue one twice (EINVAL). dequeue one by
-            // hand to get back to the expected state; that frame is lost.
-            loop {
-                if self.stopped() {
-                    return;
-                }
-                match CaptureStream::dequeue(&mut stream) {
-                    Ok(_) => break,
+        let mut spare: Vec<Vec<u8>> = Vec::new();
+        'stream: while !self.stopped() {
+            let mut stream =
+                match Stream::with_buffers(&self.device, Type::VideoCapture, BUFFER_COUNT) {
+                    Ok(s) => s,
                     Err(e) => {
-                        if let Recovery::Stop = classify(&e, "recover") {
-                            return;
+                        error!("cannot map capture buffers: {e}");
+                        self.shared.fail(format!("cannot map capture buffers: {e}"));
+                        return;
+                    }
+                };
+            stream.set_timeout(POLL_TIMEOUT);
+
+            while !self.stopped() {
+                let err = match stream.next() {
+                    Ok((buf, meta)) => {
+                        let used = (meta.bytesused as usize).min(buf.len());
+                        let out = spare.pop().unwrap_or_default();
+                        match self.build_frame(&buf[..used], out) {
+                            Ok(frame) => {
+                                if let Some(previous) = self.shared.publish(frame) {
+                                    self.recycle(&mut spare, previous);
+                                }
+                            }
+                            Err(out) => spare.push(out),
                         }
+                        continue;
+                    }
+                    Err(e) => e,
+                };
+                match self.classify(&err, "capture") {
+                    Recovery::Stop => return,
+                    Recovery::Restart => continue 'stream,
+                    Recovery::Dequeue => {}
+                }
+                loop {
+                    if self.stopped() {
+                        return;
+                    }
+                    match CaptureStream::dequeue(&mut stream) {
+                        Ok(_) => break,
+                        Err(e) => match self.classify(&e, "recover") {
+                            Recovery::Stop => return,
+                            Recovery::Restart => continue 'stream,
+                            Recovery::Dequeue => {}
+                        },
                     }
                 }
             }
@@ -84,20 +100,34 @@ impl Worker {
         self.shared.stop.load(Ordering::Relaxed)
     }
 
-    fn build_frame(&self, bytes: &[u8]) -> Option<Frame> {
+    /// keeps the buffer of a frame nobody else holds any more
+    fn recycle(&self, spare: &mut Vec<Vec<u8>>, previous: Arc<Frame>) {
+        if spare.len() >= SPARE_BUFFERS {
+            return;
+        }
+        if let Ok(frame) = Arc::try_unwrap(previous) {
+            spare.push(frame.data);
+        }
+    }
+
+    /// fills `out` with the frame; on a bad buffer the vec comes back so
+    /// it can be reused
+    fn build_frame(&self, bytes: &[u8], mut out: Vec<u8>) -> Result<Frame, Vec<u8>> {
         let received = Instant::now();
         match self.format {
             SourceFormat::Yuyv => {
                 let expected = (self.width * self.height * 2) as usize;
                 if bytes.len() < expected {
                     debug!("short yuyv buffer: {} of {expected} bytes", bytes.len());
-                    return None;
+                    return Err(out);
                 }
-                Some(Frame {
+                out.clear();
+                out.extend_from_slice(&bytes[..expected]);
+                Ok(Frame {
                     width: self.width,
                     height: self.height,
                     layout: PixelLayout::Yuyv,
-                    data: bytes[..expected].to_vec(),
+                    data: out,
                     seq: 0,
                     received,
                 })
@@ -105,44 +135,53 @@ impl Worker {
             SourceFormat::Mjpeg => {
                 if bytes.is_empty() {
                     debug!("empty mjpeg buffer");
-                    return None;
+                    return Err(out);
                 }
                 let options = DecoderOptions::default().jpeg_set_out_colorspace(ColorSpace::RGBA);
                 let mut decoder = JpegDecoder::new_with_options(ZCursor::new(bytes), options);
-                let data = match decoder.decode() {
-                    Ok(d) => d,
+                let size = match decoder.decode_headers() {
+                    Ok(()) => decoder.output_buffer_size().unwrap_or(0),
                     Err(e) => {
-                        debug!("mjpeg decode failed: {e}");
-                        return None;
+                        debug!("mjpeg header failed: {e}");
+                        return Err(out);
                     }
                 };
-                let info = decoder.info()?;
-                Some(Frame {
+                out.resize(size, 0);
+                if let Err(e) = decoder.decode_into(&mut out) {
+                    debug!("mjpeg decode failed: {e}");
+                    return Err(out);
+                }
+                let Some(info) = decoder.info() else {
+                    return Err(out);
+                };
+                Ok(Frame {
                     width: u32::from(info.width),
                     height: u32::from(info.height),
                     layout: PixelLayout::Rgba8,
-                    data,
+                    data: out,
                     seq: 0,
                     received,
                 })
             }
         }
     }
-}
 
-fn classify(err: &io::Error, what: &str) -> Recovery {
-    if err.raw_os_error() == Some(ENODEV) {
-        error!("{what}: device went away");
-        return Recovery::Stop;
-    }
-    match err.kind() {
-        io::ErrorKind::TimedOut | io::ErrorKind::Interrupted | io::ErrorKind::WouldBlock => {
-            debug!("{what}: {err}, retrying");
+    fn classify(&self, err: &io::Error, what: &str) -> Recovery {
+        if err.raw_os_error() == Some(ENODEV) {
+            error!("{what}: device went away");
+            self.shared.fail("device went away".into());
+            return Recovery::Stop;
         }
-        _ => {
-            warn!("{what}: {err}");
-            std::thread::sleep(RETRY_DELAY);
+        match err.kind() {
+            io::ErrorKind::TimedOut | io::ErrorKind::Interrupted | io::ErrorKind::WouldBlock => {
+                debug!("{what}: {err}, retrying");
+                Recovery::Dequeue
+            }
+            _ => {
+                warn!("{what}: {err}, remapping the stream");
+                std::thread::sleep(RETRY_DELAY);
+                Recovery::Restart
+            }
         }
     }
-    Recovery::Retry
 }
