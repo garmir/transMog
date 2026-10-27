@@ -11,6 +11,7 @@ run it with `nix run github:garmir/camera-app` or, from a checkout,
 and the runtime libraries on the library path, so `cargo run` works
 there too. the name camera-app is a placeholder.
 
-status: milestone 1, preview, fisheye, hardware controls. the crate
-compiles and opens an empty window; capture, controls and the fisheye
-pass are stubs that still have to be filled in.
+status: milestone 1, preview, fisheye, hardware controls. on launch it
+opens the first c920 it finds, else the first capture device, at mjpeg
+1280x720@30 when the camera offers it. the fisheye pass and the v4l2
+controls are live; ffmpeg recording and a loopback output come later.

@@ -36,6 +36,7 @@ fn run_gui() -> Result<()> {
     let options = eframe::NativeOptions {
         renderer: eframe::Renderer::Wgpu,
         viewport: egui::ViewportBuilder::default()
+            .with_app_id("camera-app")
             .with_title("camera-app")
             .with_inner_size([1280.0, 800.0]),
         ..Default::default()

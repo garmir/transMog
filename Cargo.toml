@@ -24,6 +24,11 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 parking_lot = "0.12"
 
+# an unoptimised zune-jpeg decodes 720p mjpeg at 4-5 fps, so the dev
+# profile optimises just that crate
+[profile.dev.package.zune-jpeg]
+opt-level = 3
+
 [profile.release]
 lto = true
 codegen-units = 1
