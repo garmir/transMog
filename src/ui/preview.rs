@@ -39,6 +39,10 @@ impl Preview {
         self.last_seq = None;
     }
 
+    pub fn passes(&self) -> &[Box<dyn Pass>] {
+        self.renderer.passes()
+    }
+
     pub fn passes_mut(&mut self) -> &mut Vec<Box<dyn Pass>> {
         self.renderer.passes_mut()
     }

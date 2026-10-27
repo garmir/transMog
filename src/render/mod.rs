@@ -12,6 +12,8 @@ pub struct PassCtx<'a> {
 
 pub trait Pass: Send {
     fn name(&self) -> &'static str;
+    /// lets a caller holding `&dyn Pass` reach the concrete pass
+    fn as_any(&self) -> &dyn std::any::Any;
     fn enabled(&self) -> bool;
     fn set_enabled(&mut self, on: bool);
     /// parameter widgets only; the caller draws the enable checkbox
@@ -436,6 +438,10 @@ impl Renderer {
 
     pub fn output_size(&self) -> Option<(u32, u32)> {
         self.source.as_ref().map(|s| (s.width, s.height))
+    }
+
+    pub fn passes(&self) -> &[Box<dyn Pass>] {
+        &self.passes
     }
 
     pub fn passes_mut(&mut self) -> &mut Vec<Box<dyn Pass>> {

@@ -25,6 +25,7 @@ rustPlatform.buildRustPackage {
       ./Cargo.toml
       ./Cargo.lock
       ./src
+      ./tests
       ./assets
     ]);
   };

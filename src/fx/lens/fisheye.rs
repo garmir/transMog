@@ -367,6 +367,10 @@ impl Pass for Fisheye {
         "fisheye"
     }
 
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+
     fn enabled(&self) -> bool {
         self.enabled
     }

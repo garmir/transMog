@@ -5,6 +5,8 @@ mod preview;
 
 use std::time::{Duration, Instant};
 
+use eframe::egui_wgpu::RenderState;
+
 use crate::capture::{self, Capture, CaptureConfig, DeviceInfo, FormatInfo};
 use crate::controls::{ControlInfo, Controls};
 
@@ -20,6 +22,7 @@ pub(crate) struct Selection {
 
 pub struct App {
     ctx: egui::Context,
+    render_state: Option<RenderState>,
     devices: Vec<DeviceInfo>,
     selected_device: Option<usize>,
     formats: Vec<FormatInfo>,
@@ -34,9 +37,18 @@ pub struct App {
 
 impl App {
     pub fn new(cc: &eframe::CreationContext) -> App {
-        let preview = cc.wgpu_render_state.as_ref().map(preview::Preview::new);
+        let mut app = App::from_parts(&cc.egui_ctx, cc.wgpu_render_state.clone());
+        app.autostart_with("C920");
+        app
+    }
+
+    /// everything but the autostart, so a test harness can build the app
+    /// on its own context and render state and pick the device itself
+    pub fn from_parts(ctx: &egui::Context, render_state: Option<RenderState>) -> App {
+        let preview = render_state.as_ref().map(preview::Preview::new);
         let mut app = App {
-            ctx: cc.egui_ctx.clone(),
+            ctx: ctx.clone(),
+            render_state,
             devices: Vec::new(),
             selected_device: None,
             formats: Vec::new(),
@@ -48,17 +60,19 @@ impl App {
             preview,
             status: String::new(),
         };
-        if app.preview.is_none() {
-            app.status = "no wgpu render state: the preview needs the wgpu backend".into();
-        }
+        app.status = if app.preview.is_none() {
+            "no wgpu render state: the preview needs the wgpu backend".into()
+        } else {
+            "idle".into()
+        };
         app.rescan();
-        app.autostart();
         app
     }
 
-    /// opens on the c920 when one is plugged in, else on the first
-    /// device, so the window never comes up empty
-    fn autostart(&mut self) {
+    /// opens on the first device whose name contains `prefer` when one is
+    /// plugged in, else on the first device, so the window never comes
+    /// up empty
+    pub fn autostart_with(&mut self, prefer: &str) {
         if self.devices.is_empty() {
             self.status = "no capture devices found".into();
             return;
@@ -66,7 +80,7 @@ impl App {
         let preferred = self
             .devices
             .iter()
-            .position(|d| d.name.contains("C920"))
+            .position(|d| d.name.contains(prefer))
             .unwrap_or(0);
         if self.selected_device != Some(preferred) {
             self.select_device(preferred);
@@ -118,7 +132,35 @@ impl App {
         }
     }
 
-    fn capture_config(&self) -> Option<CaptureConfig> {
+    pub fn status(&self) -> &str {
+        &self.status
+    }
+
+    pub fn capture_running(&self) -> bool {
+        self.capture.is_some()
+    }
+
+    pub fn selected_device(&self) -> Option<&DeviceInfo> {
+        self.devices.get(self.selected_device?)
+    }
+
+    pub fn selected_format(&self) -> Option<&FormatInfo> {
+        self.formats.get(self.selection.format)
+    }
+
+    /// the cached v4l2 controls of the running capture; empty when idle
+    pub fn control_infos(&self) -> &[ControlInfo] {
+        &self.control_infos
+    }
+
+    /// the preview's pass stack; empty without a renderer. reach a
+    /// concrete pass through `Pass::as_any`
+    pub fn passes(&self) -> &[Box<dyn crate::render::Pass>] {
+        self.preview.as_ref().map_or(&[], preview::Preview::passes)
+    }
+
+    /// the device, format, size and fps the start button would use
+    pub fn capture_config(&self) -> Option<CaptureConfig> {
         let device = self.devices.get(self.selected_device?)?;
         let format = self.formats.get(self.selection.format)?;
         let size = format.sizes.get(self.selection.size)?;
@@ -239,8 +281,8 @@ impl App {
         self.apply_control_actions(actions);
     }
 
-    fn show_preview(&mut self, ui: &mut egui::Ui, frame: &eframe::Frame) {
-        if let (Some(preview), Some(rs)) = (&mut self.preview, frame.wgpu_render_state()) {
+    fn show_preview(&mut self, ui: &mut egui::Ui) {
+        if let (Some(preview), Some(rs)) = (&mut self.preview, &self.render_state) {
             if let Some(latest) = self.capture.as_ref().and_then(Capture::latest) {
                 preview.upload(rs, &latest);
             }
@@ -275,8 +317,13 @@ fn edited_this_frame(ctx: &egui::Context) -> bool {
     })
 }
 
-impl eframe::App for App {
-    fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
+impl App {
+    /// the whole window: top bar, status line, side panel and preview.
+    /// `eframe::App::ui` and the test harness both call this
+    pub fn show(&mut self, ui: &mut egui::Ui) {
+        // a test harness builds its context after the app, so the wake
+        // target for new frames follows the ui that draws them
+        self.ctx = ui.ctx().clone();
         if let Some(reason) = self.capture.as_ref().and_then(Capture::finished) {
             self.stop();
             self.status = format!("capture ended: {reason}");
@@ -320,6 +367,12 @@ impl eframe::App for App {
         });
 
         self.show_side_panel(ui);
-        self.show_preview(ui, frame);
+        self.show_preview(ui);
+    }
+}
+
+impl eframe::App for App {
+    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        self.show(ui);
     }
 }
