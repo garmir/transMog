@@ -322,25 +322,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "camera-app"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "bytemuck",
- "clap",
- "crossbeam-channel",
- "eframe",
- "egui",
- "parking_lot",
- "thiserror 2.0.21",
- "tracing",
- "tracing-subscriber",
- "v4l",
- "wgpu",
- "zune-jpeg",
-]
-
-[[package]]
 name = "cc"
 version = "1.10.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2720,6 +2701,25 @@ dependencies = [
  "tracing",
  "tracing-core",
  "tracing-log",
+]
+
+[[package]]
+name = "transmog"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "bytemuck",
+ "clap",
+ "crossbeam-channel",
+ "eframe",
+ "egui",
+ "parking_lot",
+ "thiserror 2.0.21",
+ "tracing",
+ "tracing-subscriber",
+ "v4l",
+ "wgpu",
+ "zune-jpeg",
 ]
 
 [[package]]

@@ -16,19 +16,17 @@
 }:
 
 rustPlatform.buildRustPackage {
-  pname = "camera-app";
+  pname = "transmog";
   version = "0.1.0";
 
   src = lib.fileset.toSource {
     root = ./.;
-    fileset = lib.fileset.unions (
-      [
-        ./Cargo.toml
-        ./Cargo.lock
-        ./src
-        ./assets
-      ]
-    );
+    fileset = lib.fileset.unions ([
+      ./Cargo.toml
+      ./Cargo.lock
+      ./src
+      ./assets
+    ]);
   };
 
   cargoLock.lockFile = ./Cargo.lock;
@@ -51,14 +49,14 @@ rustPlatform.buildRustPackage {
   doCheck = true;
 
   postInstall = ''
-    install -Dm644 assets/camera-app.svg \
-      $out/share/icons/hicolor/scalable/apps/camera-app.svg
+    install -Dm644 assets/transmog.svg \
+      $out/share/icons/hicolor/scalable/apps/transmog.svg
   '';
 
   # winit and wgpu dlopen the wayland, x11, xkb, vulkan and gl libraries
   # instead of linking them, so the wrapper has to point at them
   postFixup = ''
-    wrapProgram $out/bin/camera-app \
+    wrapProgram $out/bin/transmog \
       --prefix LD_LIBRARY_PATH : ${
         lib.makeLibraryPath [
           wayland
@@ -75,10 +73,10 @@ rustPlatform.buildRustPackage {
 
   desktopItems = [
     (makeDesktopItem {
-      name = "camera-app";
-      desktopName = "Camera App";
-      exec = "camera-app";
-      icon = "camera-app";
+      name = "transmog";
+      desktopName = "transMog";
+      exec = "transmog";
+      icon = "transmog";
       categories = [
         "Utility"
         "Video"
@@ -91,7 +89,7 @@ rustPlatform.buildRustPackage {
   meta = {
     description = "webcam viewer with lens effects and camera control";
     license = lib.licenses.mit;
-    mainProgram = "camera-app";
+    mainProgram = "transmog";
     platforms = lib.platforms.linux;
   };
 }

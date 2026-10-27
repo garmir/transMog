@@ -1,5 +1,5 @@
 {
-  description = "camera-app, a webcam viewer with lens effects";
+  description = "transMog, a webcam viewer with lens effects";
 
   inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-26.05";
 
@@ -21,17 +21,17 @@
     in
     {
       packages.${system} = {
-        camera-app = pkgs.callPackage ./package.nix { };
-        default = self.packages.${system}.camera-app;
+        transmog = pkgs.callPackage ./package.nix { };
+        default = self.packages.${system}.transmog;
       };
 
       overlays.default = final: prev: {
-        camera-app = final.callPackage ./package.nix { };
+        transmog = final.callPackage ./package.nix { };
       };
 
       formatter.${system} = pkgs.nixfmt-tree;
 
-      checks.${system}.camera-app = self.packages.${system}.camera-app;
+      checks.${system}.transmog = self.packages.${system}.transmog;
 
       devShells.${system}.default = pkgs.mkShell {
         packages = with pkgs; [

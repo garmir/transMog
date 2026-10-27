@@ -3,11 +3,7 @@ use clap::{Parser, Subcommand};
 use tracing_subscriber::EnvFilter;
 
 #[derive(Parser)]
-#[command(
-    name = "camera-app",
-    version,
-    about = "webcam viewer with lens effects"
-)]
+#[command(name = "transmog", version, about = "webcam viewer with lens effects")]
 struct Cli {
     #[command(subcommand)]
     command: Option<Command>,
@@ -36,15 +32,15 @@ fn run_gui() -> Result<()> {
     let options = eframe::NativeOptions {
         renderer: eframe::Renderer::Wgpu,
         viewport: egui::ViewportBuilder::default()
-            .with_app_id("camera-app")
-            .with_title("camera-app")
+            .with_app_id("transmog")
+            .with_title("transMog")
             .with_inner_size([1280.0, 800.0]),
         ..Default::default()
     };
     eframe::run_native(
-        "camera-app",
+        "transMog",
         options,
-        Box::new(|cc| Ok(Box::new(camera_app::ui::App::new(cc)))),
+        Box::new(|cc| Ok(Box::new(transmog::ui::App::new(cc)))),
     )
     .map_err(|e| anyhow::anyhow!("eframe: {e}"))
 }

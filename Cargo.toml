@@ -1,12 +1,12 @@
 [package]
-name = "camera-app"
+name = "transmog"
 version = "0.1.0"
 edition = "2021"
 license = "MIT"
 description = "webcam viewer with lens effects and camera control"
 
 [[bin]]
-name = "camera-app"
+name = "transmog"
 path = "src/main.rs"
 
 [dependencies]
