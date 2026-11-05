@@ -210,8 +210,8 @@ pub struct Frame {
     pub received: Instant,
 }
 
-/// where a published frame came from, kept beside the frame so the
-/// struct literal of `Frame` stays as it was
+/// where a published frame came from; kept beside `Frame` so the struct
+/// literal that tests build needs no new field
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct FrameMeta {
     /// the `Frame::seq` this belongs to
