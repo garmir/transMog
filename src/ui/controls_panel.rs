@@ -1,3 +1,4 @@
+use crate::controls::preset::ctl_name;
 use crate::controls::{ControlInfo, ControlKind};
 
 #[derive(Clone, Copy, Debug)]
@@ -9,8 +10,13 @@ pub(crate) enum Action {
 
 /// draws the cached controls grouped by class and returns what the user
 /// asked for; the caller applies the actions and re-queries, so the
-/// widgets never hold state of their own
-pub(crate) fn show(ui: &mut egui::Ui, infos: &[ControlInfo]) -> Vec<Action> {
+/// widgets never hold state of their own. a control `held` names by its
+/// v4l2-ctl name is shown but cannot be changed
+pub(crate) fn show(
+    ui: &mut egui::Ui,
+    infos: &[ControlInfo],
+    held: &dyn Fn(&str) -> bool,
+) -> Vec<Action> {
     let mut actions = Vec::new();
     if infos.is_empty() {
         ui.weak("no controls (start a capture)");
@@ -32,16 +38,16 @@ pub(crate) fn show(ui: &mut egui::Ui, infos: &[ControlInfo]) -> Vec<Action> {
             .default_open(true)
             .show(ui, |ui| {
                 for info in infos.iter().filter(|i| i.class == class) {
-                    show_control(ui, info, &mut actions);
+                    show_control(ui, info, held(&ctl_name(&info.name)), &mut actions);
                 }
             });
     }
     actions
 }
 
-fn show_control(ui: &mut egui::Ui, info: &ControlInfo, actions: &mut Vec<Action>) {
-    let enabled = !info.inactive && !info.read_only;
-    ui.horizontal(|ui| {
+fn show_control(ui: &mut egui::Ui, info: &ControlInfo, held: bool, actions: &mut Vec<Action>) {
+    let enabled = !info.inactive && !info.read_only && !held;
+    let row = ui.horizontal(|ui| {
         ui.add_enabled_ui(enabled, |ui| match &info.kind {
             ControlKind::Integer {
                 min,
@@ -101,4 +107,8 @@ fn show_control(ui: &mut egui::Ui, info: &ControlInfo, actions: &mut Vec<Action>
             actions.push(Action::Reset(info.id));
         }
     });
+    if held {
+        row.response
+            .on_hover_text("held at the qa preset by the qa lock (live control)");
+    }
 }

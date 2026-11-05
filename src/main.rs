@@ -29,6 +29,14 @@ enum Command {
         /// send the effected view as the NDI source `HOST (transMog)`
         #[arg(long)]
         ndi: bool,
+        /// read live `key value` lines from PATH instead of
+        /// `<tap dir>/control`
+        #[arg(long, value_name = "PATH")]
+        control_file: Option<PathBuf>,
+        /// subscribe to a viz_ctrl websocket and apply the pairs in
+        /// assets.camera.transmog, e.g. ws://192.168.1.242:9980/viz_ctrl/ws
+        #[arg(long, value_name = "URL")]
+        control: Option<String>,
     },
     /// list, save or apply camera presets without the window
     Preset {
@@ -68,17 +76,33 @@ fn main() -> Result<()> {
         tap: None,
         preset: None,
         ndi: false,
+        control_file: None,
+        control: None,
     }) {
-        Command::Gui { tap, preset, ndi } => run_gui(
+        Command::Gui {
+            tap,
+            preset,
+            ndi,
+            control_file,
+            control,
+        } => run_gui(
             tap.map(|dir| dir.unwrap_or_else(capture::tap::default_dir)),
             preset,
             ndi,
+            control_file,
+            control,
         ),
         Command::Preset { action } => run_preset(action),
     }
 }
 
-fn run_gui(tap: Option<PathBuf>, preset: Option<String>, ndi: bool) -> Result<()> {
+fn run_gui(
+    tap: Option<PathBuf>,
+    preset: Option<String>,
+    ndi: bool,
+    control_file: Option<PathBuf>,
+    control: Option<String>,
+) -> Result<()> {
     let options = eframe::NativeOptions {
         renderer: eframe::Renderer::Wgpu,
         viewport: egui::ViewportBuilder::default()
@@ -100,6 +124,12 @@ fn run_gui(tap: Option<PathBuf>, preset: Option<String>, ndi: bool) -> Result<()
             }
             if ndi {
                 app.set_ndi(true);
+            }
+            if let Some(path) = control_file {
+                app.set_control_file(path);
+            }
+            if let Some(url) = control {
+                app.subscribe(&url);
             }
             Ok(Box::new(app))
         }),

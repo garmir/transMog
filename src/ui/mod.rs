@@ -1,6 +1,7 @@
 mod controls_panel;
 mod devices;
 mod fx_panel;
+mod live;
 mod overlay;
 mod preview;
 mod qa_panel;
@@ -50,6 +51,7 @@ pub struct App {
     tap_dir: PathBuf,
     overlay: overlay::Overlay,
     show_overlay: bool,
+    live: live::Live,
 }
 
 impl App {
@@ -84,6 +86,7 @@ impl App {
             tap_dir: tap::default_dir(),
             overlay: overlay::Overlay::new(tap::default_dir().join("overlay")),
             show_overlay: true,
+            live: live::Live::new(tap::default_dir().join("control")),
         };
         app.status = if app.preview.is_none() {
             "no wgpu render state: the preview needs the wgpu backend".into()
@@ -264,6 +267,7 @@ impl App {
                 }
                 self.tap = Some(tap);
                 self.overlay = overlay::Overlay::new(dir.join("overlay"));
+                self.follow_tap_dir(&dir);
                 self.tap_dir = dir;
             }
             Err(e) => self.status = format!("tap: {e:#}"),
@@ -296,16 +300,26 @@ impl App {
     }
 
     /// the format line first, which restarts the capture when it differs,
-    /// then the controls; everything is read back into `readback`
-    pub fn apply_preset(&mut self, name: &str) {
+    /// then the controls; everything is read back into `readback`. with
+    /// the qa lock on, another preset leaves the held controls alone.
+    /// true when every value read back as set
+    pub fn apply_preset(&mut self, name: &str) -> bool {
         self.preset_ui.choice = Some(name.to_string());
-        let preset = match preset::load(name) {
+        let mut preset = match preset::load(name) {
             Ok(p) => p,
             Err(e) => {
                 self.status = format!("preset {name}: {e:#}");
-                return;
+                return false;
             }
         };
+        let mut held = 0;
+        if name != crate::live::LOCK_PRESET {
+            preset.controls.retain(|(key, _)| {
+                let keep = !self.held(key);
+                held += usize::from(!keep);
+                keep
+            });
+        }
         self.readback.clear();
         self.readback_format = None;
         if let Some(want) = &preset.format {
@@ -318,7 +332,7 @@ impl App {
                 }
                 None => {
                     self.status = format!("preset {name}: the camera does not offer {want}");
-                    return;
+                    return false;
                 }
             }
             let got = self
@@ -330,13 +344,13 @@ impl App {
         }
         let Some(controls) = &self.controls else {
             self.status = format!("preset {name}: no camera controls open");
-            return;
+            return false;
         };
         match preset.apply(controls) {
             Ok(readback) => self.readback = readback,
             Err(e) => {
                 self.status = format!("preset {name}: {e:#}");
-                return;
+                return false;
             }
         }
         self.query_controls();
@@ -347,9 +361,13 @@ impl App {
         } else {
             format!("preset {name}: {off} values read back different")
         };
+        if held > 0 {
+            self.status += &format!(", {held} held by the qa lock");
+        }
         for r in &self.readback {
             tracing::info!(preset = name, control = %r.name, wanted = r.wanted, got = ?r.got, error = ?r.error);
         }
+        off == 0
     }
 
     /// the last apply's read-back
@@ -375,7 +393,9 @@ impl App {
 
     fn apply_qa_event(&mut self, event: qa_panel::Event) {
         match event {
-            qa_panel::Event::Apply(name) => self.apply_preset(&name),
+            qa_panel::Event::Apply(name) => {
+                self.apply_preset(&name);
+            }
             qa_panel::Event::Save(name) => self.save_preset(&name),
             qa_panel::Event::Reload => self.presets = preset::list(),
             qa_panel::Event::Tap(on) => {
@@ -401,6 +421,9 @@ impl App {
         if actions.is_empty() {
             return;
         }
+        let reset_all = actions
+            .iter()
+            .any(|a| matches!(a, controls_panel::Action::ResetAll));
         if let Some(controls) = &self.controls {
             for action in actions {
                 let result = match action {
@@ -412,6 +435,10 @@ impl App {
                     self.status = format!("{action:?}: {e:#}");
                 }
             }
+        }
+        // reset all also resets what the lock holds
+        if reset_all && self.live.qa_lock {
+            self.hold();
         }
         self.query_controls();
     }
@@ -472,10 +499,14 @@ impl App {
                                     ui.ctx().request_repaint_after(CONTROL_REFRESH);
                                 }
                             });
+                        egui::CollapsingHeader::new("live control")
+                            .default_open(false)
+                            .show(ui, |ui| live::show(ui, self));
                         egui::CollapsingHeader::new("camera")
                             .default_open(true)
                             .show(ui, |ui| {
-                                actions = controls_panel::show(ui, &self.control_infos);
+                                let held = |key: &str| self.held(key);
+                                actions = controls_panel::show(ui, &self.control_infos, &held);
                             });
                     });
             });
@@ -551,6 +582,7 @@ impl App {
         if self.controls.is_some() && self.controls_queried.elapsed() >= CONTROL_REFRESH {
             self.query_controls();
         }
+        self.tick_live();
 
         egui::Panel::top("top").show(ui, |ui| {
             if let Some(event) = devices::show_top_bar(ui, self) {

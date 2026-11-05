@@ -18,6 +18,16 @@ pub trait Pass: Send {
     fn set_enabled(&mut self, on: bool);
     /// parameter widgets only; the caller draws the enable checkbox
     fn ui(&mut self, ui: &mut egui::Ui);
+    /// the parameters live control reads and writes, by field name, as
+    /// `name value` text; the enable flag is the caller's
+    fn params(&self) -> Vec<(&'static str, String)> {
+        Vec::new()
+    }
+    /// sets one parameter from live control text, clamped as the widget
+    /// clamps it
+    fn set_param(&mut self, name: &str, _value: &str) -> Result<(), String> {
+        Err(format!("{} has no parameter {name}", self.name()))
+    }
     fn encode(
         &mut self,
         ctx: &PassCtx,

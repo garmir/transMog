@@ -102,3 +102,45 @@ fn builtin_camera_captures() {
     assert!(!harness.state().capture_running());
     assert_eq!(harness.state().status(), "stopped");
 }
+
+/// a control file changes the lens and the lock, control.state reports
+/// it, and a file that is rewritten unchanged does not undo a slider
+#[test]
+fn control_file_drives_the_lens() {
+    let dir = std::env::temp_dir().join(format!("transmog-control-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let control = dir.join("control");
+    let mut harness = harness_no_camera();
+    harness.state_mut().set_control_file(control.clone());
+    harness.step();
+    if harness.state().passes().is_empty() {
+        eprintln!("skipped: no renderer");
+        return;
+    }
+    let text = "fisheye_lens_fov 90\nfisheye_projection rectilinear\nqa_lock 0\nnope 1\n";
+    let poll = || std::thread::sleep(std::time::Duration::from_millis(150));
+    std::fs::write(&control, text).unwrap();
+    poll();
+    harness.step();
+    assert_eq!(fisheye(&harness).lens_fov(), 90.0);
+    assert_eq!(fisheye(&harness).projection(), Projection::Rectilinear);
+    assert!(!harness.state().qa_lock());
+    let state = std::fs::read_to_string(dir.join("control.state")).unwrap();
+    assert!(
+        state.contains("\nset fisheye_lens_fov 90 90 ok file\n"),
+        "{state}"
+    );
+    assert!(state.contains("\nset nope 1 - error file "), "{state}");
+    assert!(state.contains("\nlens fisheye_lens_fov 90\n"), "{state}");
+
+    set_slider(&mut harness, "lens angle", 120.0);
+    harness.step();
+    let state = std::fs::read_to_string(dir.join("control.state")).unwrap();
+    assert!(state.contains("\nlens fisheye_lens_fov 120\n"), "{state}");
+
+    std::fs::write(&control, text).unwrap();
+    poll();
+    harness.step();
+    assert_eq!(fisheye(&harness).lens_fov(), 120.0);
+    std::fs::remove_dir_all(&dir).unwrap();
+}

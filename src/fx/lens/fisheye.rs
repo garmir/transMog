@@ -379,6 +379,65 @@ impl Pass for Fisheye {
         self.enabled = on;
     }
 
+    fn params(&self) -> Vec<(&'static str, String)> {
+        vec![
+            ("projection", self.projection.label().into()),
+            ("lens_fov", self.lens_fov.to_string()),
+            ("source_fov", self.source_fov.to_string()),
+            ("fit", u8::from(self.fit).to_string()),
+            ("zoom", self.zoom.to_string()),
+            ("k1", self.k1.to_string()),
+            ("yaw", self.yaw.to_string()),
+            ("pitch", self.pitch.to_string()),
+            ("roll", self.roll.to_string()),
+            ("edge", self.edge.label().into()),
+            ("centre_x", self.centre[0].to_string()),
+            ("centre_y", self.centre[1].to_string()),
+        ]
+    }
+
+    fn set_param(&mut self, name: &str, value: &str) -> Result<(), String> {
+        let number = || {
+            crate::live::float(value)
+                .map(|v| v as f32)
+                .ok_or_else(|| format!("{name} wants a number, got {value}"))
+        };
+        // a menu in TouchDesigner sends its index, a person types the label
+        fn pick<T: Copy>(all: &[T], label: fn(T) -> &'static str, value: &str) -> Option<T> {
+            match value.parse::<f64>() {
+                Ok(i) if i >= 0.0 => all.get(i.round() as usize).copied(),
+                _ => all.iter().copied().find(|t| label(*t) == value),
+            }
+        }
+        match name {
+            "projection" => {
+                self.projection = pick(&Projection::ALL, Projection::label, value)
+                    .ok_or_else(|| format!("no projection {value}"))?;
+            }
+            "lens_fov" => self.set_lens_fov(number()?),
+            "source_fov" => self.set_source_fov(number()?),
+            "fit" => self.fit = number()? != 0.0,
+            "zoom" => self.set_zoom(number()?),
+            "k1" => self.set_k1(number()?),
+            "yaw" | "pitch" | "roll" => {
+                let mut r = self.rotation();
+                r[["yaw", "pitch", "roll"]
+                    .iter()
+                    .position(|n| *n == name)
+                    .expect("listed")] = number()?;
+                self.set_rotation(r);
+            }
+            "edge" => {
+                self.edge = pick(&Edge::ALL, Edge::label, value)
+                    .ok_or_else(|| format!("no edge {value}"))?;
+            }
+            "centre_x" => self.set_centre([number()?, self.centre[1]]),
+            "centre_y" => self.set_centre([self.centre[0], number()?]),
+            _ => return Err(format!("fisheye has no parameter {name}")),
+        }
+        Ok(())
+    }
+
     fn ui(&mut self, ui: &mut egui::Ui) {
         egui::ComboBox::from_id_salt("fisheye projection")
             .selected_text(self.projection.label())

@@ -105,3 +105,68 @@ that one package; `$NDI_RUNTIME_DIR_V6` points at another copy. ndi
 republishes the installer under one url, so the flake overrides the hash
 nixpkgs has; when the download stops matching, the new hash goes in
 `overlays.ndi`.
+
+## live control
+
+transMog reads `key value` lines from `<tap dir>/control`, or from the
+file `gui --control-file PATH` names, checking its mtime every 100 ms the
+way it checks the overlay. `gui --control ws://HOST:PORT/PATH` also
+subscribes to a websocket, TouchDesigner's `/viz_ctrl/ws` on ki1be, and
+takes the object at `assets.camera.transmog` from each json message as the
+same pairs. both can run at once.
+
+- a v4l2 control by its v4l2-ctl name: `zoom_absolute 150`,
+  `focus_automatic_continuous 0`, `power_line_frequency 1`. values are
+  integers; `on`, `off`, `true`, `false` and fractions (rounded) are taken
+  too.
+- a pass parameter as `<pass>_<field>`, the fields of the pass's struct:
+  `fisheye_enabled`, `fisheye_projection` (a label or its index in the
+  menu), `fisheye_lens_fov`, `fisheye_source_fov`, `fisheye_fit`,
+  `fisheye_zoom`, `fisheye_k1`, `fisheye_yaw`, `fisheye_pitch`,
+  `fisheye_roll`, `fisheye_edge`, `fisheye_centre_x`, `fisheye_centre_y`.
+  angles are in degrees and clamped as the sliders clamp them.
+- `preset NAME`, `ndi on|off` and `qa_lock 0|1`.
+
+a pair is applied only when its value differs from the last one the same
+source sent. viz_ctrl repeats its whole state about 56 times a second, so
+without this a slider moved in the window would snap back on the next
+message. when the file and the websocket change one key in the same tick
+the file wins; otherwise the later change wins. the window's own widgets
+show the live values, since they draw from the same pass fields and the
+same control read-back.
+
+after each change the controls are read back, and `control.state` beside
+the control file is rewritten through a dot file and a rename whenever its
+content moves, by a change from either source or from the window:
+
+    t 1793921606.898878
+    qa_lock 1
+    ndi on
+    file /run/user/1000/transmog/tap/control
+    ws ws://192.168.1.242:9980/viz_ctrl/ws connected
+    set zoom_absolute 150 150 ok ws:7644
+    set gain 200 159 locked file
+    cam zoom_absolute 150
+    lens fisheye_lens_fov 180
+
+a `set` line is `KEY WANTED GOT STATUS SOURCE [MESSAGE]`, the status one of
+`ok`, `differs` (written, read back otherwise; the C920 keeps gain 160 as
+159), `locked` or `error`, and the source `file` or `ws:SEQ` with the
+message's seq. `cam` lines are every v4l2 control as last read, `lens`
+lines every pass parameter.
+
+`qa_lock`, on from the start, holds exposure_time_absolute, auto_exposure,
+exposure_dynamic_framerate, gain, focus_absolute,
+focus_automatic_continuous, white_balance_* and power_line_frequency at
+the `qa` preset's values, because the latency ruler decodes stamp cells
+off the camera picture and a moving exposure smears them. a held key from
+either source is reported `locked` and not written, the window greys those
+widgets out, another preset skips them, and turning the lock back on, or
+"reset all", writes the qa values again. zoom, pan, tilt and the pass
+parameters are never held. the lock does nothing while no `qa` preset
+exists. the checkbox under "live control" turns it off.
+
+the websocket client is std only and speaks plain `ws://`: text frames,
+pings answered, no tls, and it does not check the server's accept hash. it
+reconnects from 0.5 s to 10 s apart and drops a link that has been silent
+for 5 s.
