@@ -17,7 +17,10 @@ use v4l::video::capture::Parameters;
 use v4l::video::Capture as _;
 use v4l::{Device, Format};
 
+pub mod tap;
 mod worker;
+
+pub use tap::{Tap, TapStatus};
 
 const FOURCC_YUYV: FourCC = FourCC { repr: *b"YUYV" };
 const FOURCC_MJPG: FourCC = FourCC { repr: *b"MJPG" };
@@ -218,6 +221,10 @@ pub struct CaptureConfig {
 
 type Wake = Box<dyn Fn() + Send + Sync>;
 
+/// one tap outlives the captures it is handed to, so its sequence keeps
+/// counting across a format change
+pub type SharedTap = Arc<Mutex<Tap>>;
+
 /// state shared between the capture thread and its handle
 struct Shared {
     latest: Mutex<Option<Arc<Frame>>>,
@@ -225,6 +232,7 @@ struct Shared {
     stamps: Mutex<VecDeque<Instant>>,
     stop: AtomicBool,
     wake: Mutex<Option<Wake>>,
+    tap: Mutex<Option<SharedTap>>,
     /// why the worker returned, set before it does
     error: Mutex<Option<String>>,
 }
@@ -267,6 +275,8 @@ fn prune_stamps(stamps: &mut VecDeque<Instant>, now: Instant) {
 /// owns a capture thread that stops on drop
 pub struct Capture {
     config: CaptureConfig,
+    /// the size and rate the driver read back after S_FMT and S_PARM
+    actual: CaptureConfig,
     shared: Arc<Shared>,
     thread: Option<JoinHandle<()>>,
 }
@@ -319,6 +329,7 @@ impl Capture {
             stamps: Mutex::new(VecDeque::new()),
             stop: AtomicBool::new(false),
             wake: Mutex::new(None),
+            tap: Mutex::new(None),
             error: Mutex::new(None),
         });
 
@@ -334,8 +345,16 @@ impl Capture {
             .spawn(move || worker.run())
             .context("spawn capture thread")?;
 
+        let actual = CaptureConfig {
+            width: got.width,
+            height: got.height,
+            fps: fps_from_interval(params.interval.numerator, params.interval.denominator)
+                .unwrap_or(cfg.fps),
+            ..cfg.clone()
+        };
         Ok(Capture {
             config: cfg,
+            actual,
             shared,
             thread: Some(thread),
         })
@@ -356,6 +375,15 @@ impl Capture {
 
     pub fn config(&self) -> &CaptureConfig {
         &self.config
+    }
+
+    pub fn actual(&self) -> &CaptureConfig {
+        &self.actual
+    }
+
+    /// every dequeued buffer goes to the tap before it is decoded
+    pub fn set_tap(&self, tap: Option<SharedTap>) {
+        *self.shared.tap.lock() = tap;
     }
 
     /// called from the capture thread after every published frame

@@ -107,10 +107,11 @@ impl Preview {
     }
 
     /// draws the output letterboxed into whatever space the panel gives
-    pub fn show(&self, ui: &mut egui::Ui) {
+    /// and returns where the image went and its size in pixels
+    pub fn show(&self, ui: &mut egui::Ui) -> Option<(egui::Rect, (u32, u32))> {
         let Some(bound) = &self.bound else {
             ui.centered_and_justified(|ui| ui.weak("no frame yet"));
-            return;
+            return None;
         };
         let id = bound.ids[self.renderer.output_index()];
         let (w, h) = (bound.size.0 as f32, bound.size.1 as f32);
@@ -124,5 +125,6 @@ impl Preview {
             egui::Image::from_texture(egui::load::SizedTexture::new(id, egui::vec2(w, h)))
                 .fit_to_exact_size(size),
         );
+        Some((rect, bound.size))
     }
 }

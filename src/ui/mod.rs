@@ -1,13 +1,21 @@
 mod controls_panel;
 mod devices;
 mod fx_panel;
+mod overlay;
 mod preview;
+mod qa_panel;
 
+use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use eframe::egui_wgpu::RenderState;
+use parking_lot::Mutex;
 
-use crate::capture::{self, Capture, CaptureConfig, DeviceInfo, FormatInfo};
+use crate::capture::{
+    self, tap, Capture, CaptureConfig, DeviceInfo, FormatInfo, SharedTap, Tap, TapStatus,
+};
+use crate::controls::preset::{self, Preset, PresetFormat, Readback};
 use crate::controls::{ControlInfo, Controls};
 
 const CONTROL_REFRESH: Duration = Duration::from_secs(1);
@@ -33,6 +41,15 @@ pub struct App {
     controls_queried: Instant,
     preview: Option<preview::Preview>,
     status: String,
+    presets: Vec<String>,
+    preset_ui: qa_panel::State,
+    readback: Vec<Readback>,
+    /// wanted against read back, for the last preset with a format line
+    readback_format: Option<(String, String)>,
+    tap: Option<SharedTap>,
+    tap_dir: PathBuf,
+    overlay: overlay::Overlay,
+    show_overlay: bool,
 }
 
 impl App {
@@ -59,6 +76,14 @@ impl App {
             controls_queried: Instant::now(),
             preview,
             status: String::new(),
+            presets: preset::list(),
+            preset_ui: qa_panel::State::default(),
+            readback: Vec::new(),
+            readback_format: None,
+            tap: None,
+            tap_dir: tap::default_dir(),
+            overlay: overlay::Overlay::new(tap::default_dir().join("overlay")),
+            show_overlay: true,
         };
         app.status = if app.preview.is_none() {
             "no wgpu render state: the preview needs the wgpu backend".into()
@@ -187,6 +212,7 @@ impl App {
             Ok(capture) => {
                 let ctx = self.ctx.clone();
                 capture.set_wake(move || ctx.request_repaint());
+                capture.set_tap(self.tap.clone());
                 self.capture = Some(capture);
             }
             Err(e) => {
@@ -215,6 +241,124 @@ impl App {
         self.capture = None;
         self.controls = None;
         self.control_infos.clear();
+    }
+
+    /// the tap keeps its sequence across capture restarts; none turns it
+    /// off. the overlay file is read from the same directory
+    pub fn set_tap(&mut self, dir: Option<PathBuf>) {
+        let Some(dir) = dir else {
+            self.tap = None;
+            if let Some(capture) = &self.capture {
+                capture.set_tap(None);
+            }
+            return;
+        };
+        match Tap::open(&dir, tap::DEFAULT_SLOTS) {
+            Ok(tap) => {
+                let tap = Arc::new(Mutex::new(tap));
+                if let Some(capture) = &self.capture {
+                    capture.set_tap(Some(Arc::clone(&tap)));
+                }
+                self.tap = Some(tap);
+                self.overlay = overlay::Overlay::new(dir.join("overlay"));
+                self.tap_dir = dir;
+            }
+            Err(e) => self.status = format!("tap: {e:#}"),
+        }
+    }
+
+    pub fn tap_status(&self) -> Option<TapStatus> {
+        self.tap.as_ref().map(|t| t.lock().status())
+    }
+
+    /// the format line first, which restarts the capture when it differs,
+    /// then the controls; everything is read back into `readback`
+    pub fn apply_preset(&mut self, name: &str) {
+        self.preset_ui.choice = Some(name.to_string());
+        let preset = match preset::load(name) {
+            Ok(p) => p,
+            Err(e) => {
+                self.status = format!("preset {name}: {e:#}");
+                return;
+            }
+        };
+        self.readback.clear();
+        self.readback_format = None;
+        if let Some(want) = &preset.format {
+            match devices::find_selection(&self.formats, want) {
+                Some(selection) => {
+                    if selection != self.selection || self.capture.is_none() {
+                        self.selection = selection;
+                        self.start();
+                    }
+                }
+                None => {
+                    self.status = format!("preset {name}: the camera does not offer {want}");
+                    return;
+                }
+            }
+            let got = self
+                .capture
+                .as_ref()
+                .map(|c| PresetFormat::from(c.actual()).to_string())
+                .unwrap_or_else(|| "not capturing".into());
+            self.readback_format = Some((want.to_string(), got));
+        }
+        let Some(controls) = &self.controls else {
+            self.status = format!("preset {name}: no camera controls open");
+            return;
+        };
+        match preset.apply(controls) {
+            Ok(readback) => self.readback = readback,
+            Err(e) => {
+                self.status = format!("preset {name}: {e:#}");
+                return;
+            }
+        }
+        self.query_controls();
+        let off = self.readback.iter().filter(|r| !r.ok()).count()
+            + usize::from(self.readback_format.as_ref().is_some_and(|(w, g)| w != g));
+        self.status = if off == 0 {
+            format!("preset {name}: every value read back as set")
+        } else {
+            format!("preset {name}: {off} values read back different")
+        };
+        for r in &self.readback {
+            tracing::info!(preset = name, control = %r.name, wanted = r.wanted, got = ?r.got, error = ?r.error);
+        }
+    }
+
+    /// the last apply's read-back
+    pub fn readback(&self) -> &[Readback] {
+        &self.readback
+    }
+
+    fn save_preset(&mut self, name: &str) {
+        let format = self
+            .capture
+            .as_ref()
+            .map(|c| PresetFormat::from(c.actual()));
+        let preset = Preset::from_current(format, &self.control_infos);
+        match preset::save(name, &preset) {
+            Ok(path) => {
+                self.status = format!("saved {}", path.display());
+                self.presets = preset::list();
+                self.preset_ui.choice = Some(name.to_string());
+            }
+            Err(e) => self.status = format!("save preset: {e:#}"),
+        }
+    }
+
+    fn apply_qa_event(&mut self, event: qa_panel::Event) {
+        match event {
+            qa_panel::Event::Apply(name) => self.apply_preset(&name),
+            qa_panel::Event::Save(name) => self.save_preset(&name),
+            qa_panel::Event::Reload => self.presets = preset::list(),
+            qa_panel::Event::Tap(on) => {
+                let dir = self.tap_dir.clone();
+                self.set_tap(on.then_some(dir));
+            }
+        }
     }
 
     fn query_controls(&mut self) {
@@ -249,6 +393,7 @@ impl App {
 
     fn show_side_panel(&mut self, ui: &mut egui::Ui) {
         let mut actions = Vec::new();
+        let mut qa_events = Vec::new();
         egui::Panel::right("side")
             .resizable(true)
             .default_size(320.0)
@@ -271,6 +416,28 @@ impl App {
                                     ui.weak("no renderer");
                                 }
                             });
+                        egui::CollapsingHeader::new("presets")
+                            .default_open(true)
+                            .show(ui, |ui| {
+                                qa_events.extend(qa_panel::show_presets(
+                                    ui,
+                                    &mut self.preset_ui,
+                                    &self.presets,
+                                    &self.readback,
+                                    self.readback_format.as_ref(),
+                                ));
+                            });
+                        egui::CollapsingHeader::new("qa tap")
+                            .default_open(false)
+                            .show(ui, |ui| {
+                                let status = self.tap_status();
+                                qa_events.extend(qa_panel::show_tap(
+                                    ui,
+                                    status.as_ref(),
+                                    &self.tap_dir,
+                                    &mut self.show_overlay,
+                                ));
+                            });
                         egui::CollapsingHeader::new("camera")
                             .default_open(true)
                             .show(ui, |ui| {
@@ -279,6 +446,9 @@ impl App {
                     });
             });
         self.apply_control_actions(actions);
+        for event in qa_events {
+            self.apply_qa_event(event);
+        }
     }
 
     fn show_preview(&mut self, ui: &mut egui::Ui) {
@@ -288,10 +458,20 @@ impl App {
             }
             preview.render(rs);
         }
+        let overlay = self.show_overlay && self.tap.is_some();
         egui::CentralPanel::default()
             .frame(egui::Frame::NONE.fill(egui::Color32::from_gray(12)))
             .show(ui, |ui| match &self.preview {
-                Some(preview) => preview.show(ui),
+                Some(preview) => {
+                    if let Some((rect, size)) = preview.show(ui) {
+                        if overlay {
+                            let bent = preview.passes().iter().any(|p| p.enabled());
+                            self.overlay.show(ui, rect, size, !bent);
+                            // the overlay file changes without a new frame
+                            ui.ctx().request_repaint_after(Duration::from_millis(250));
+                        }
+                    }
+                }
                 None => {
                     ui.centered_and_justified(|ui| ui.weak("preview unavailable"));
                 }

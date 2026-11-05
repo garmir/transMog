@@ -1,4 +1,5 @@
 use crate::capture::{FormatInfo, SourceFormat};
+use crate::controls::preset::PresetFormat;
 
 use super::{App, Selection};
 
@@ -62,6 +63,26 @@ pub(crate) fn preferred_selection(formats: &[FormatInfo]) -> Selection {
     }
 
     best.map(|(_, s)| s).unwrap_or_default()
+}
+
+/// the indices of an exact format, size and rate, if the device offers it
+pub(crate) fn find_selection(formats: &[FormatInfo], want: &PresetFormat) -> Option<Selection> {
+    formats.iter().enumerate().find_map(|(fi, format)| {
+        if format.format != want.format {
+            return None;
+        }
+        format.sizes.iter().enumerate().find_map(|(si, size)| {
+            if (size.width, size.height) != (want.width, want.height) {
+                return None;
+            }
+            let fps = size.fps.iter().position(|&f| f == want.fps)?;
+            Some(Selection {
+                format: fi,
+                size: si,
+                fps,
+            })
+        })
+    })
 }
 
 fn format_label(format: SourceFormat) -> &'static str {
@@ -253,6 +274,35 @@ mod tests {
                 fps: 0
             }
         );
+    }
+
+    #[test]
+    fn preset_format_finds_its_indices() {
+        let formats = vec![
+            FormatInfo {
+                format: SourceFormat::Yuyv,
+                sizes: vec![size(1920, 1080, &[5])],
+            },
+            FormatInfo {
+                format: SourceFormat::Mjpeg,
+                sizes: vec![size(1280, 720, &[30]), size(1920, 1080, &[30, 24])],
+            },
+        ];
+        let want = |w, h, fps| PresetFormat {
+            format: SourceFormat::Mjpeg,
+            width: w,
+            height: h,
+            fps,
+        };
+        assert_eq!(
+            find_selection(&formats, &want(1920, 1080, 24)),
+            Some(Selection {
+                format: 1,
+                size: 1,
+                fps: 1
+            })
+        );
+        assert_eq!(find_selection(&formats, &want(1920, 1080, 60)), None);
     }
 
     #[test]

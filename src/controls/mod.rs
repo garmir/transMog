@@ -8,6 +8,8 @@ use v4l::v4l2;
 use v4l::v4l_sys::{v4l2_ext_control, v4l2_query_ext_ctrl};
 use v4l::Device;
 
+pub mod preset;
+
 // the v4l crate keeps its own v4l2_ext_controls private because bindgen
 // turns the ctrl_class/which union into something it cannot name, so a
 // matching layout lives here for the one raw VIDIOC_G_EXT_CTRLS call

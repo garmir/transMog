@@ -60,7 +60,17 @@ impl Worker {
             while !self.stopped() {
                 let err = match stream.next() {
                     Ok((buf, meta)) => {
+                        let dequeued_ns = super::tap::monotonic_ns();
                         let used = (meta.bytesused as usize).min(buf.len());
+                        if let Some(tap) = self.shared.tap.lock().as_ref() {
+                            tap.lock().write(
+                                &buf[..used],
+                                meta,
+                                self.format.fourcc(),
+                                (self.width, self.height),
+                                dequeued_ns,
+                            );
+                        }
                         let out = spare.pop().unwrap_or_default();
                         match self.build_frame(&buf[..used], out) {
                             Ok(frame) => {

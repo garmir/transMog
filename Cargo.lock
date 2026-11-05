@@ -2896,6 +2896,7 @@ dependencies = [
  "eframe",
  "egui",
  "egui_kittest",
+ "libc",
  "parking_lot",
  "thiserror 2.0.21",
  "tracing",
