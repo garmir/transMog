@@ -436,6 +436,15 @@ impl Renderer {
         self.output
     }
 
+    /// the target that still holds the converted, unbent frame after
+    /// render(). the convert pass writes target 0 and the first pass
+    /// reads it, so it survives one enabled pass; a second pass writes
+    /// over it
+    pub fn raw_index(&self) -> Option<usize> {
+        let enabled = self.passes.iter().filter(|p| p.enabled()).count();
+        (enabled <= 1).then_some(0)
+    }
+
     pub fn output_size(&self) -> Option<(u32, u32)> {
         self.source.as_ref().map(|s| (s.width, s.height))
     }

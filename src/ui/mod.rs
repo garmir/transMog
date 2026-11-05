@@ -1,3 +1,4 @@
+mod aim_panel;
 mod controls_panel;
 mod devices;
 mod fx_panel;
@@ -12,13 +13,16 @@ use std::time::{Duration, Instant};
 use eframe::egui_wgpu::RenderState;
 use parking_lot::Mutex;
 
+use crate::aim::{calibration, Aim, FitRun, Limits, Ptz, Step};
 use crate::capture::{
     self, tap, Capture, CaptureConfig, DeviceInfo, FormatInfo, SharedTap, Tap, TapStatus,
 };
-use crate::controls::preset::{self, Preset, PresetFormat, Readback};
-use crate::controls::{ControlInfo, Controls};
+use crate::controls::preset::{self, ctl_name, Preset, PresetFormat, Readback};
+use crate::controls::{ControlInfo, ControlKind, Controls};
 
 const CONTROL_REFRESH: Duration = Duration::from_secs(1);
+/// how long a framing write gets to land before the fit reads a picture
+const FIT_SETTLE: Duration = Duration::from_millis(500);
 
 /// indices into `App::formats` and its nested size and fps lists
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
@@ -50,6 +54,10 @@ pub struct App {
     tap_dir: PathBuf,
     overlay: overlay::Overlay,
     show_overlay: bool,
+    /// the analysis thread, only while aim mode is on
+    aim: Option<Aim>,
+    aim_ui: aim_panel::State,
+    calibration: PathBuf,
 }
 
 impl App {
@@ -84,6 +92,9 @@ impl App {
             tap_dir: tap::default_dir(),
             overlay: overlay::Overlay::new(tap::default_dir().join("overlay")),
             show_overlay: true,
+            aim: None,
+            aim_ui: aim_panel::State::default(),
+            calibration: preset::dir().with_file_name("calibration.json"),
         };
         app.status = if app.preview.is_none() {
             "no wgpu render state: the preview needs the wgpu backend".into()
@@ -213,6 +224,9 @@ impl App {
                 let ctx = self.ctx.clone();
                 capture.set_wake(move || ctx.request_repaint());
                 capture.set_tap(self.tap.clone());
+                if let Some(aim) = &self.aim {
+                    aim.set_source(Some(capture.source()));
+                }
                 self.capture = Some(capture);
             }
             Err(e) => {
@@ -241,6 +255,210 @@ impl App {
         self.capture = None;
         self.controls = None;
         self.control_infos.clear();
+        self.aim_ui.fit = None;
+        if let Some(aim) = &self.aim {
+            aim.set_source(None);
+        }
+    }
+
+    pub fn aim_on(&self) -> bool {
+        self.aim.is_some()
+    }
+
+    /// aim mode runs its analysis thread only while it is on
+    pub fn set_aim(&mut self, on: bool) {
+        if on == self.aim.is_some() {
+            return;
+        }
+        if !on {
+            self.aim = None;
+            self.aim_ui.fit = None;
+            return;
+        }
+        let aim = Aim::start(self.capture.as_ref().map(Capture::source));
+        let ctx = self.ctx.clone();
+        aim.set_wake(move || ctx.request_repaint());
+        if let Some((ptz, _)) = self.framing() {
+            aim.set_zoom(ptz.zoom);
+        }
+        self.aim = Some(aim);
+    }
+
+    /// where "save calibration" writes
+    pub fn set_calibration_path(&mut self, path: PathBuf) {
+        self.calibration = path;
+    }
+
+    fn control_id(&self, name: &str) -> Option<&ControlInfo> {
+        self.control_infos
+            .iter()
+            .find(|c| ctl_name(&c.name) == name)
+    }
+
+    /// zoom, pan and tilt as last read, with their ranges; none unless
+    /// the camera has all three
+    fn framing(&self) -> Option<(Ptz, Limits)> {
+        let mut ptz = Ptz {
+            zoom: 100,
+            pan: 0,
+            tilt: 0,
+        };
+        let mut limits = Limits::C920;
+        for (i, name) in Ptz::CONTROLS.iter().enumerate() {
+            let info = self.control_id(name)?;
+            ptz.set(i, info.value);
+            if let ControlKind::Integer { min, max, step, .. } = info.kind {
+                limits.0[i] = (min, max, step);
+            }
+        }
+        Some((ptz, limits))
+    }
+
+    /// writes the framing controls that differ, never any other, and
+    /// reads all three back
+    fn set_framing(&mut self, want: Ptz) {
+        let Some((now, _)) = self.framing() else {
+            return;
+        };
+        let ids: Vec<Option<u32>> = Ptz::CONTROLS
+            .iter()
+            .map(|n| self.control_id(n).map(|c| c.id))
+            .collect();
+        if let Some(controls) = &self.controls {
+            for (i, id) in ids.iter().enumerate() {
+                let Some(id) = *id else {
+                    continue;
+                };
+                if want.get(i) == now.get(i) {
+                    continue;
+                }
+                if let Err(e) = controls.set(id, want.get(i)) {
+                    self.status = format!("{}: {e:#}", Ptz::CONTROLS[i]);
+                }
+            }
+        }
+        self.query_controls();
+        let got = self.framing().map(|(p, _)| p);
+        self.aim_ui.readback = (0..3)
+            .map(|i| (Ptz::CONTROLS[i], want.get(i), got.map(|p| p.get(i))))
+            .collect();
+        for (name, wanted, got) in &self.aim_ui.readback {
+            tracing::info!(control = name, wanted, got = ?got, "aim framing");
+        }
+        if let (Some(aim), Some(p)) = (&self.aim, got) {
+            aim.set_zoom(p.zoom);
+        }
+    }
+
+    fn apply_aim_event(&mut self, event: aim_panel::Event) {
+        let Some((now, _)) = self.framing() else {
+            return;
+        };
+        match event {
+            aim_panel::Event::Set(i, v) => {
+                let mut want = now;
+                want.set(i, v);
+                self.set_framing(want);
+            }
+            aim_panel::Event::Fit => {
+                self.aim_ui.fit = Some(FitRun::default());
+                // the first step waits for an analysis newer than the click
+                self.aim_ui.fit_changed = Some(Instant::now());
+                self.aim_ui.fit_status = "fitting".into();
+            }
+            aim_panel::Event::StopFit => {
+                self.aim_ui.fit = None;
+                self.aim_ui.fit_status = "fit stopped".into();
+            }
+            aim_panel::Event::ResetFraming => {
+                self.aim_ui.fit = None;
+                self.set_framing(Ptz {
+                    zoom: 100,
+                    pan: 0,
+                    tilt: 0,
+                });
+            }
+            aim_panel::Event::Save => self.save_calibration(),
+        }
+    }
+
+    /// one fit step for each analysis of a picture taken after the last
+    /// write had time to land
+    fn tick_fit(&mut self) {
+        let Some(report) = self.aim.as_ref().and_then(Aim::report) else {
+            return;
+        };
+        if self.aim_ui.fit.is_none()
+            || self
+                .aim_ui
+                .fit_changed
+                .is_some_and(|t| report.analysed < t + FIT_SETTLE)
+        {
+            return;
+        }
+        let Some((now, limits)) = self.framing() else {
+            self.aim_ui.fit = None;
+            return;
+        };
+        let union = (report.screens.len() == 2)
+            .then(|| report.union())
+            .flatten();
+        let size = (report.size.0 as f32, report.size.1 as f32);
+        let Some(run) = self.aim_ui.fit.as_mut() else {
+            return;
+        };
+        match run.next(union, size, now, &limits) {
+            Step::Set(want) => {
+                self.set_framing(want);
+                self.aim_ui.fit_changed = Some(Instant::now());
+                self.aim_ui.fit_status = format!(
+                    "fitting: zoom {} pan {} tilt {}",
+                    want.zoom, want.pan, want.tilt
+                );
+            }
+            Step::Done(message) => {
+                self.aim_ui.fit = None;
+                self.aim_ui.fit_status = message;
+            }
+        }
+    }
+
+    /// both screens' homographies and stamp blocks, in the format the
+    /// latency tools read; the file already there is kept beside it
+    fn save_calibration(&mut self) {
+        let Some(report) = self.aim.as_ref().and_then(Aim::report) else {
+            return;
+        };
+        if !report.aim_ok {
+            self.aim_ui.saved = "not saved: aim is not OK".into();
+            return;
+        }
+        let ptz = self.framing().map_or(
+            Ptz {
+                zoom: report.zoom,
+                pan: 0,
+                tilt: 0,
+            },
+            |f| f.0,
+        );
+        let screens: Vec<_> = report
+            .screens
+            .iter()
+            .map(|s| (&s.screen, s.rate.map_or(0.0, |r| r.0)))
+            .collect();
+        let (when, stamp) = calibration::local_time();
+        let json = calibration::to_json(&screens, report.size, ptz, &when);
+        match calibration::save(&self.calibration, &json, &stamp) {
+            Ok(backup) => {
+                self.aim_ui.saved = match &backup {
+                    Some(b) => format!("saved {when}; the old file is {}", b.display()),
+                    None => format!("saved {when}"),
+                };
+                self.status = format!("calibration saved to {}", self.calibration.display());
+                tracing::info!(path = %self.calibration.display(), backup = ?backup, "calibration saved");
+            }
+            Err(e) => self.aim_ui.saved = format!("save failed: {e:#}"),
+        }
     }
 
     /// the tap keeps its sequence across capture restarts; none turns it
@@ -394,6 +612,9 @@ impl App {
     fn show_side_panel(&mut self, ui: &mut egui::Ui) {
         let mut actions = Vec::new();
         let mut qa_events = Vec::new();
+        let mut aim_events = Vec::new();
+        let aim_report = self.aim.as_ref().and_then(Aim::report);
+        let framing = self.framing();
         egui::Panel::right("side")
             .resizable(true)
             .default_size(320.0)
@@ -402,6 +623,19 @@ impl App {
                 egui::ScrollArea::vertical()
                     .auto_shrink([false, false])
                     .show(ui, |ui| {
+                        if self.aim.is_some() {
+                            egui::CollapsingHeader::new("aim")
+                                .default_open(true)
+                                .show(ui, |ui| {
+                                    aim_events = aim_panel::show(
+                                        ui,
+                                        &self.aim_ui,
+                                        aim_report.as_deref(),
+                                        framing,
+                                        &self.calibration,
+                                    );
+                                });
+                        }
                         egui::CollapsingHeader::new("lens")
                             .default_open(true)
                             .show(ui, |ui| {
@@ -449,6 +683,9 @@ impl App {
         for event in qa_events {
             self.apply_qa_event(event);
         }
+        for event in aim_events {
+            self.apply_aim_event(event);
+        }
     }
 
     fn show_preview(&mut self, ui: &mut egui::Ui) {
@@ -458,17 +695,21 @@ impl App {
             }
             preview.render(rs);
         }
-        let overlay = self.show_overlay && self.tap.is_some();
+        let aim = self.aim.as_ref().and_then(Aim::report);
+        // aim mode draws its own outlines in place of the file's
+        let overlay = self.show_overlay && self.tap.is_some() && self.aim.is_none();
         egui::CentralPanel::default()
             .frame(egui::Frame::NONE.fill(egui::Color32::from_gray(12)))
             .show(ui, |ui| match &self.preview {
                 Some(preview) => {
-                    if let Some((rect, size)) = preview.show(ui) {
+                    if let Some((rect, size, unbent)) = preview.show(ui, aim.is_some()) {
                         if overlay {
-                            let bent = preview.passes().iter().any(|p| p.enabled());
-                            self.overlay.show(ui, rect, size, !bent);
+                            self.overlay.show(ui, rect, size, unbent);
                             // the overlay file changes without a new frame
                             ui.ctx().request_repaint_after(Duration::from_millis(250));
+                        }
+                        if let Some(report) = aim.as_ref().filter(|r| r.size == size) {
+                            aim_panel::draw(ui, rect, size, report, unbent);
                         }
                     }
                 }
@@ -515,7 +756,15 @@ impl App {
         }
         if self.controls.is_some() && self.controls_queried.elapsed() >= CONTROL_REFRESH {
             self.query_controls();
+            if let (Some(aim), Some((ptz, _))) = (&self.aim, self.framing()) {
+                aim.set_zoom(ptz.zoom);
+            }
         }
+        let plain_a = ui.input(|i| i.key_pressed(egui::Key::A) && i.modifiers.is_none());
+        if plain_a && !ui.ctx().egui_wants_keyboard_input() {
+            self.set_aim(!self.aim_on());
+        }
+        self.tick_fit();
 
         egui::Panel::top("top").show(ui, |ui| {
             if let Some(event) = devices::show_top_bar(ui, self) {
@@ -528,6 +777,7 @@ impl App {
                             self.start();
                         }
                     }
+                    devices::Event::Aim => self.set_aim(!self.aim_on()),
                     devices::Event::Toggle => {
                         if self.capture.is_some() {
                             self.stop();

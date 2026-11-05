@@ -272,6 +272,18 @@ fn prune_stamps(stamps: &mut VecDeque<Instant>, now: Instant) {
     }
 }
 
+/// the newest frame of one capture, readable from any thread
+#[derive(Clone)]
+pub struct FrameSource {
+    shared: Arc<Shared>,
+}
+
+impl FrameSource {
+    pub fn latest(&self) -> Option<Arc<Frame>> {
+        self.shared.latest.lock().clone()
+    }
+}
+
 /// owns a capture thread that stops on drop
 pub struct Capture {
     config: CaptureConfig,
@@ -364,6 +376,14 @@ impl Capture {
     /// frame arrives
     pub fn latest(&self) -> Option<Arc<Frame>> {
         self.shared.latest.lock().clone()
+    }
+
+    /// a handle on the newest frame for another thread; it keeps working
+    /// until the capture is dropped and then repeats the last frame
+    pub fn source(&self) -> FrameSource {
+        FrameSource {
+            shared: Arc::clone(&self.shared),
+        }
     }
 
     /// rolling one second estimate

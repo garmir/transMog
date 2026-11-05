@@ -1,3 +1,4 @@
+pub mod aim;
 pub mod capture;
 pub mod controls;
 pub mod fx;

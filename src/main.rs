@@ -26,6 +26,13 @@ enum Command {
         /// apply this preset once the camera is open
         #[arg(long, value_name = "NAME")]
         preset: Option<String>,
+        /// start in aim mode
+        #[arg(long)]
+        aim: bool,
+        /// where aim mode's "save calibration" writes
+        /// ($XDG_CONFIG_HOME/transmog/calibration.json by default)
+        #[arg(long, value_name = "FILE")]
+        calibration: Option<PathBuf>,
     },
     /// list, save or apply camera presets without the window
     Preset {
@@ -64,16 +71,30 @@ fn main() -> Result<()> {
     match cli.command.unwrap_or(Command::Gui {
         tap: None,
         preset: None,
+        aim: false,
+        calibration: None,
     }) {
-        Command::Gui { tap, preset } => run_gui(
+        Command::Gui {
+            tap,
+            preset,
+            aim,
+            calibration,
+        } => run_gui(
             tap.map(|dir| dir.unwrap_or_else(capture::tap::default_dir)),
             preset,
+            aim,
+            calibration,
         ),
         Command::Preset { action } => run_preset(action),
     }
 }
 
-fn run_gui(tap: Option<PathBuf>, preset: Option<String>) -> Result<()> {
+fn run_gui(
+    tap: Option<PathBuf>,
+    preset: Option<String>,
+    aim: bool,
+    calibration: Option<PathBuf>,
+) -> Result<()> {
     let options = eframe::NativeOptions {
         renderer: eframe::Renderer::Wgpu,
         viewport: egui::ViewportBuilder::default()
@@ -93,6 +114,10 @@ fn run_gui(tap: Option<PathBuf>, preset: Option<String>) -> Result<()> {
             if let Some(name) = preset {
                 app.apply_preset(&name);
             }
+            if let Some(path) = calibration {
+                app.set_calibration_path(path);
+            }
+            app.set_aim(aim);
             Ok(Box::new(app))
         }),
     )

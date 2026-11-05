@@ -107,13 +107,19 @@ impl Preview {
     }
 
     /// draws the output letterboxed into whatever space the panel gives
-    /// and returns where the image went and its size in pixels
-    pub fn show(&self, ui: &mut egui::Ui) -> Option<(egui::Rect, (u32, u32))> {
+    /// and returns where the image went, its size in pixels and whether
+    /// it is unbent. with `raw` the converted frame before the passes is
+    /// shown when the renderer still holds it; the passes keep running
+    /// for anything that reads the output
+    pub fn show(&self, ui: &mut egui::Ui, raw: bool) -> Option<(egui::Rect, (u32, u32), bool)> {
         let Some(bound) = &self.bound else {
             ui.centered_and_justified(|ui| ui.weak("no frame yet"));
             return None;
         };
-        let id = bound.ids[self.renderer.output_index()];
+        let bypass = raw.then(|| self.renderer.raw_index()).flatten();
+        let index = bypass.unwrap_or(self.renderer.output_index());
+        let unbent = bypass.is_some() || !self.passes().iter().any(|p| p.enabled());
+        let id = bound.ids[index];
         let (w, h) = (bound.size.0 as f32, bound.size.1 as f32);
         let avail = ui.available_rect_before_wrap();
         let scale = (avail.width() / w).min(avail.height() / h);
@@ -125,6 +131,6 @@ impl Preview {
             egui::Image::from_texture(egui::load::SizedTexture::new(id, egui::vec2(w, h)))
                 .fit_to_exact_size(size),
         );
-        Some((rect, bound.size))
+        Some((rect, bound.size, unbent))
     }
 }
