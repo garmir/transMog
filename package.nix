@@ -13,6 +13,7 @@
   libxcursor,
   libxi,
   libxcb,
+  ndi-6,
 }:
 
 rustPlatform.buildRustPackage {
@@ -55,7 +56,8 @@ rustPlatform.buildRustPackage {
   '';
 
   # winit and wgpu dlopen the wayland, x11, xkb, vulkan and gl libraries
-  # instead of linking them, so the wrapper has to point at them
+  # instead of linking them, and the NDI sender dlopens libndi only when
+  # switched on, so the wrapper has to point at them
   postFixup = ''
     wrapProgram $out/bin/transmog \
       --prefix LD_LIBRARY_PATH : ${
@@ -68,6 +70,7 @@ rustPlatform.buildRustPackage {
           libxcursor
           libxi
           libxcb
+          ndi-6
         ]
       }
   '';

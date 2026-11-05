@@ -2,12 +2,14 @@ use std::path::Path;
 
 use crate::capture::TapStatus;
 use crate::controls::preset::Readback;
+use crate::ndi;
 
 pub(crate) enum Event {
     Apply(String),
     Save(String),
     Reload,
     Tap(bool),
+    Ndi(bool),
 }
 
 /// the preset picked in the combo box and the name typed for a save
@@ -118,5 +120,30 @@ pub(crate) fn show_tap(
         }
     }
     ui.checkbox(overlay, "overlay from the tap's overlay file");
+    event
+}
+
+pub(crate) fn show_ndi(ui: &mut egui::Ui, stats: Option<&ndi::Stats>) -> Option<Event> {
+    let mut event = None;
+    let mut on = stats.is_some();
+    if ui.checkbox(&mut on, "NDI out").changed() {
+        event = Some(Event::Ndi(on));
+    }
+    if let Some(s) = stats {
+        ui.monospace(format!(
+            "{} ({}), sdk {}",
+            ndi::SOURCE_NAME,
+            s.connections,
+            s.version
+        ));
+        ui.monospace(format!(
+            "{} sent, {} skipped, {} failed, seq {}",
+            s.sent, s.skipped, s.failed, s.last_seq
+        ));
+        ui.monospace(format!(
+            "readback {:.2} ms, send {:.2} ms",
+            s.readback_ms, s.send_ms
+        ));
+    }
     event
 }

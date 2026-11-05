@@ -62,19 +62,23 @@ impl Worker {
                     Ok((buf, meta)) => {
                         let dequeued_ns = super::tap::monotonic_ns();
                         let used = (meta.bytesused as usize).min(buf.len());
-                        if let Some(tap) = self.shared.tap.lock().as_ref() {
+                        let kernel_ns =
+                            super::tap::timeval_ns(meta.timestamp.sec, meta.timestamp.usec);
+                        let tap_seq = self.shared.tap.lock().as_ref().map(|tap| {
                             tap.lock().write(
                                 &buf[..used],
                                 meta,
                                 self.format.fourcc(),
                                 (self.width, self.height),
                                 dequeued_ns,
-                            );
-                        }
+                            )
+                        });
                         let out = spare.pop().unwrap_or_default();
                         match self.build_frame(&buf[..used], out) {
                             Ok(frame) => {
-                                if let Some(previous) = self.shared.publish(frame) {
+                                if let Some(previous) =
+                                    self.shared.publish(frame, tap_seq, kernel_ns)
+                                {
                                     self.recycle(&mut spare, previous);
                                 }
                             }

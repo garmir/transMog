@@ -1,8 +1,9 @@
 use eframe::egui_wgpu::RenderState;
 use eframe::wgpu;
 
-use crate::capture::Frame;
+use crate::capture::{Frame, FrameMeta};
 use crate::fx;
+use crate::ndi;
 use crate::render::{Pass, Renderer};
 
 /// egui ids for both ping-pong targets, registered once per set of
@@ -19,6 +20,9 @@ pub(crate) struct Preview {
     last_seq: Option<u64>,
     /// a new frame or a parameter change since the last render
     dirty: bool,
+    /// the uploaded frame's tap seq and timestamp, until NDI out sends it
+    unsent: Option<FrameMeta>,
+    ndi: Option<ndi::Output>,
 }
 
 impl Preview {
@@ -30,7 +34,29 @@ impl Preview {
             bound: None,
             last_seq: None,
             dirty: false,
+            unsent: None,
+            ndi: None,
         }
+    }
+
+    /// starts or stops NDI out; an error leaves it off
+    pub fn set_ndi(&mut self, rs: &RenderState, on: bool) -> anyhow::Result<()> {
+        if !on {
+            self.ndi = None;
+            return Ok(());
+        }
+        if self.ndi.is_none() {
+            self.ndi = Some(ndi::Output::new(&rs.device, self.renderer.input_layout())?);
+        }
+        Ok(())
+    }
+
+    pub fn ndi(&self) -> Option<&ndi::Output> {
+        self.ndi.as_ref()
+    }
+
+    pub fn ndi_mut(&mut self) -> Option<&mut ndi::Output> {
+        self.ndi.as_mut()
     }
 
     /// forgets the last uploaded sequence number so the first frame of a
@@ -52,12 +78,13 @@ impl Preview {
         self.dirty = true;
     }
 
-    pub fn upload(&mut self, rs: &RenderState, frame: &Frame) {
+    pub fn upload(&mut self, rs: &RenderState, frame: &Frame, meta: Option<FrameMeta>) {
         if self.last_seq == Some(frame.seq) {
             return;
         }
         self.last_seq = Some(frame.seq);
         self.renderer.upload(&rs.device, &rs.queue, frame);
+        self.unsent = meta.filter(|m| m.seq == frame.seq);
         self.dirty = true;
     }
 
@@ -76,7 +103,25 @@ impl Preview {
                     label: Some("preview"),
                 });
             self.renderer.render(&rs.device, &rs.queue, &mut encoder);
-            rs.queue.submit(Some(encoder.finish()));
+            // a parameter change re-renders a frame already sent, so only a
+            // new camera frame goes out
+            let pending = match (&mut self.ndi, self.unsent.take()) {
+                (Some(out), Some(meta)) => {
+                    let input = self.renderer.output_view();
+                    let size = self.renderer.output_size();
+                    match (input, size) {
+                        (Some(input), Some(size)) => {
+                            out.encode(&rs.device, &rs.queue, &mut encoder, input, size, &meta)
+                        }
+                        _ => None,
+                    }
+                }
+                _ => None,
+            };
+            let submission = rs.queue.submit(Some(encoder.finish()));
+            if let (Some(out), Some(pending)) = (&mut self.ndi, pending) {
+                out.submitted(pending, submission);
+            }
         }
 
         let (Some(views), Some(size)) = (self.renderer.target_views(), self.renderer.output_size())

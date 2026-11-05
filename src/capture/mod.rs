@@ -210,6 +210,18 @@ pub struct Frame {
     pub received: Instant,
 }
 
+/// where a published frame came from, kept beside the frame so the
+/// struct literal of `Frame` stays as it was
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FrameMeta {
+    /// the `Frame::seq` this belongs to
+    pub seq: u64,
+    /// the tap's seq for the same buffer, when the tap was on
+    pub tap_seq: Option<u64>,
+    /// v4l2 kernel timestamp, ns, CLOCK_MONOTONIC
+    pub kernel_ns: i64,
+}
+
 #[derive(Clone, Debug)]
 pub struct CaptureConfig {
     pub path: PathBuf,
@@ -227,7 +239,7 @@ pub type SharedTap = Arc<Mutex<Tap>>;
 
 /// state shared between the capture thread and its handle
 struct Shared {
-    latest: Mutex<Option<Arc<Frame>>>,
+    latest: Mutex<Option<(Arc<Frame>, FrameMeta)>>,
     seq: AtomicU64,
     stamps: Mutex<VecDeque<Instant>>,
     stop: AtomicBool,
@@ -242,10 +254,24 @@ const FPS_WINDOW: Duration = Duration::from_secs(1);
 impl Shared {
     /// hands back the frame it replaced, so the worker can drop or
     /// recycle it outside the lock
-    fn publish(&self, mut frame: Frame) -> Option<Arc<Frame>> {
+    fn publish(
+        &self,
+        mut frame: Frame,
+        tap_seq: Option<u64>,
+        kernel_ns: i64,
+    ) -> Option<Arc<Frame>> {
         let now = frame.received;
         frame.seq = self.seq.fetch_add(1, Ordering::Relaxed) + 1;
-        let previous = self.latest.lock().replace(Arc::new(frame));
+        let meta = FrameMeta {
+            seq: frame.seq,
+            tap_seq,
+            kernel_ns,
+        };
+        let previous = self
+            .latest
+            .lock()
+            .replace((Arc::new(frame), meta))
+            .map(|(frame, _)| frame);
         {
             let mut stamps = self.stamps.lock();
             stamps.push_back(now);
@@ -363,7 +389,20 @@ impl Capture {
     /// newest frame, never blocks; the same arc comes back until a newer
     /// frame arrives
     pub fn latest(&self) -> Option<Arc<Frame>> {
-        self.shared.latest.lock().clone()
+        self.shared
+            .latest
+            .lock()
+            .as_ref()
+            .map(|(f, _)| Arc::clone(f))
+    }
+
+    /// the newest frame together with its tap seq and kernel timestamp
+    pub fn latest_with_meta(&self) -> Option<(Arc<Frame>, FrameMeta)> {
+        self.shared
+            .latest
+            .lock()
+            .as_ref()
+            .map(|(f, m)| (Arc::clone(f), *m))
     }
 
     /// rolling one second estimate

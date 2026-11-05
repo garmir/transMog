@@ -213,6 +213,9 @@ impl App {
                 let ctx = self.ctx.clone();
                 capture.set_wake(move || ctx.request_repaint());
                 capture.set_tap(self.tap.clone());
+                if let Some(out) = self.preview.as_mut().and_then(preview::Preview::ndi_mut) {
+                    out.set_fps(capture.actual().fps);
+                }
                 self.capture = Some(capture);
             }
             Err(e) => {
@@ -265,6 +268,27 @@ impl App {
             }
             Err(e) => self.status = format!("tap: {e:#}"),
         }
+    }
+
+    /// sends the effected view as the NDI source `HOST (transMog)`
+    pub fn set_ndi(&mut self, on: bool) {
+        let (Some(preview), Some(rs)) = (&mut self.preview, &self.render_state) else {
+            self.status = "ndi: no renderer".into();
+            return;
+        };
+        match preview.set_ndi(rs, on) {
+            Ok(()) => {
+                let fps = self.capture.as_ref().map(|c| c.actual().fps);
+                if let (Some(out), Some(fps)) = (preview.ndi_mut(), fps) {
+                    out.set_fps(fps);
+                }
+            }
+            Err(e) => self.status = format!("ndi: {e:#}"),
+        }
+    }
+
+    pub fn ndi_stats(&self) -> Option<crate::ndi::Stats> {
+        self.preview.as_ref()?.ndi().map(crate::ndi::Output::stats)
     }
 
     pub fn tap_status(&self) -> Option<TapStatus> {
@@ -358,6 +382,7 @@ impl App {
                 let dir = self.tap_dir.clone();
                 self.set_tap(on.then_some(dir));
             }
+            qa_panel::Event::Ndi(on) => self.set_ndi(on),
         }
     }
 
@@ -438,6 +463,15 @@ impl App {
                                     &mut self.show_overlay,
                                 ));
                             });
+                        egui::CollapsingHeader::new("ndi")
+                            .default_open(false)
+                            .show(ui, |ui| {
+                                let stats = self.ndi_stats();
+                                qa_events.extend(qa_panel::show_ndi(ui, stats.as_ref()));
+                                if stats.is_some() {
+                                    ui.ctx().request_repaint_after(CONTROL_REFRESH);
+                                }
+                            });
                         egui::CollapsingHeader::new("camera")
                             .default_open(true)
                             .show(ui, |ui| {
@@ -453,8 +487,9 @@ impl App {
 
     fn show_preview(&mut self, ui: &mut egui::Ui) {
         if let (Some(preview), Some(rs)) = (&mut self.preview, &self.render_state) {
-            if let Some(latest) = self.capture.as_ref().and_then(Capture::latest) {
-                preview.upload(rs, &latest);
+            if let Some((latest, meta)) = self.capture.as_ref().and_then(Capture::latest_with_meta)
+            {
+                preview.upload(rs, &latest, Some(meta));
             }
             preview.render(rs);
         }

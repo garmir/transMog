@@ -26,6 +26,9 @@ enum Command {
         /// apply this preset once the camera is open
         #[arg(long, value_name = "NAME")]
         preset: Option<String>,
+        /// send the effected view as the NDI source `HOST (transMog)`
+        #[arg(long)]
+        ndi: bool,
     },
     /// list, save or apply camera presets without the window
     Preset {
@@ -64,16 +67,18 @@ fn main() -> Result<()> {
     match cli.command.unwrap_or(Command::Gui {
         tap: None,
         preset: None,
+        ndi: false,
     }) {
-        Command::Gui { tap, preset } => run_gui(
+        Command::Gui { tap, preset, ndi } => run_gui(
             tap.map(|dir| dir.unwrap_or_else(capture::tap::default_dir)),
             preset,
+            ndi,
         ),
         Command::Preset { action } => run_preset(action),
     }
 }
 
-fn run_gui(tap: Option<PathBuf>, preset: Option<String>) -> Result<()> {
+fn run_gui(tap: Option<PathBuf>, preset: Option<String>, ndi: bool) -> Result<()> {
     let options = eframe::NativeOptions {
         renderer: eframe::Renderer::Wgpu,
         viewport: egui::ViewportBuilder::default()
@@ -92,6 +97,9 @@ fn run_gui(tap: Option<PathBuf>, preset: Option<String>) -> Result<()> {
             }
             if let Some(name) = preset {
                 app.apply_preset(&name);
+            }
+            if ndi {
+                app.set_ndi(true);
             }
             Ok(Box::new(app))
         }),

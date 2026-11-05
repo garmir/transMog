@@ -74,3 +74,34 @@ over the preview: `quad LABEL x0 y0 x1 y1 x2 y2 x3 y3` in camera pixels and
 `text ANY WORDS` lines. outlines only line up with the lens off, so they
 are hidden while a pass is enabled; the text always shows, marked stale
 after 5 s without a change.
+
+## ndi out
+
+`transmog gui --ndi`, or the "NDI out" checkbox under "ndi", sends the
+picture as it leaves the last gpu pass, so with the lens on a receiver gets
+the bent view, at the capture size and as each camera frame arrives
+(`clock_video` off). the source is called `transMog`; receivers list it with
+the host in front, `ROTMACHINE (transMog)` on rotmachine.
+
+a pass packs the frame to uyvy (bt.709 limited range) on the gpu, a ring of
+3 buffers reads it back, and a thread of its own maps them and hands them to
+the sdk's async send. the ui thread never waits: when all three buffers are
+still in flight the frame is skipped and counted. the panel shows frames
+sent, skipped and failed, the receiver count, and the mean time from submit
+to mapped and of the send call.
+
+every frame carries `<tm seq="N" ts="NS"/>` as its ndi metadata: the tap's
+seq and the v4l2 kernel timestamp (ns, CLOCK_MONOTONIC) of the buffer it was
+made from. with the tap off, seq is the capture's own frame count. the same
+seq & 0xffff is burned into the top 32 rows after every pass, for paths that
+drop metadata: 16 cells of width / 16 px, most significant bit on the left,
+Y 235 for 1 and Y 16 for 0, the scheme of the visualiser's stamp rows.
+`src/ndi/stamp.rs` has the encoder and a decoder that averages the middle
+of each cell.
+
+libndi is opened with dlopen when ndi out starts, so the binary runs without
+it. the flake and the package bring nixpkgs' `ndi-6`, unfree, allowed for
+that one package; `$NDI_RUNTIME_DIR_V6` points at another copy. ndi
+republishes the installer under one url, so the flake overrides the hash
+nixpkgs has; when the download stops matching, the new hash goes in
+`overlays.ndi`.

@@ -7,7 +7,12 @@
     { self, nixpkgs }:
     let
       system = "x86_64-linux";
-      pkgs = nixpkgs.legacyPackages.${system};
+      pkgs = import nixpkgs {
+        inherit system;
+        # the NDI SDK is the one unfree package transMog needs
+        config.allowUnfreePredicate = pkg: nixpkgs.lib.getName pkg == "ndi-6";
+        overlays = [ self.overlays.ndi ];
+      };
       runtimeLibs = with pkgs; [
         wayland
         libxkbcommon
@@ -23,6 +28,18 @@
       packages.${system} = {
         transmog = pkgs.callPackage ./package.nix { };
         default = self.packages.${system}.transmog;
+      };
+
+      # NDI republishes the 6.x installer under one url, so the hash in
+      # nixpkgs goes stale with every point release; this one is the
+      # 2026-11-05 tarball, which unpacks libndi 6.3.2
+      overlays.ndi = final: prev: {
+        ndi-6 = prev.ndi-6.overrideAttrs (old: {
+          src = final.fetchurl {
+            inherit (old.src) url;
+            hash = "sha256-8DFPJFRG3vxIi2POtGiazxqWWu79ray3BXG7IWqMwYM=";
+          };
+        });
       };
 
       overlays.default = final: prev: {
@@ -48,12 +65,14 @@
           ffmpeg
         ];
 
-        buildInputs = runtimeLibs;
+        buildInputs = runtimeLibs ++ [ pkgs.ndi-6 ];
 
-        # winit and wgpu dlopen these at run time, so cargo run needs them
-        # on the library path
+        # winit, wgpu and the NDI sender dlopen these at run time, so cargo
+        # run needs them on the library path
         shellHook = ''
-          export LD_LIBRARY_PATH=${pkgs.lib.makeLibraryPath runtimeLibs}''${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}
+          export LD_LIBRARY_PATH=${
+            pkgs.lib.makeLibraryPath (runtimeLibs ++ [ pkgs.ndi-6 ])
+          }''${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}
         '';
       };
     };

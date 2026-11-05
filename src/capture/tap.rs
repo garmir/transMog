@@ -71,7 +71,8 @@ impl Tap {
     }
 
     /// `dequeued_ns` is CLOCK_MONOTONIC right after DQBUF returned; a
-    /// failed write is counted and never stops the capture
+    /// failed write is counted and never stops the capture. returns the
+    /// seq the slot got
     pub fn write(
         &mut self,
         bytes: &[u8],
@@ -79,7 +80,7 @@ impl Tap {
         fourcc: FourCC,
         size: (u32, u32),
         dequeued_ns: i64,
-    ) {
+    ) -> u64 {
         self.seq += 1;
         let header = Header {
             seq: self.seq,
@@ -96,6 +97,7 @@ impl Tap {
             self.errors += 1;
             self.last_error = Some(e.to_string());
         }
+        self.seq
     }
 
     fn write_slot(&mut self, header: &Header, bytes: &[u8]) -> io::Result<()> {
@@ -169,7 +171,7 @@ impl Header {
 
 // time_t is 32 bits on some targets, so the casts are not always no-ops
 #[allow(clippy::unnecessary_cast)]
-fn timeval_ns(sec: libc::time_t, usec: libc::time_t) -> i64 {
+pub(crate) fn timeval_ns(sec: libc::time_t, usec: libc::time_t) -> i64 {
     sec as i64 * 1_000_000_000 + usec as i64 * 1_000
 }
 
