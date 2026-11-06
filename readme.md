@@ -125,7 +125,7 @@ subscribes to a websocket, TouchDesigner's `/viz_ctrl/ws` on ki1be, and
 takes the object at `assets.camera.transmog` from each json message as the
 same pairs. both can run at once.
 
-- a v4l2 control by its v4l2-ctl name: `zoom_absolute 150`,
+- a v4l2 control by its v4l2-ctl name: `brightness 128`,
   `focus_automatic_continuous 0`, `power_line_frequency 1`. values are
   integers; `on`, `off`, `true`, `false` and fractions (rounded) are taken
   too.
