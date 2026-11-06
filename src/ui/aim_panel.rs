@@ -297,6 +297,16 @@ fn show_report(ui: &mut egui::Ui, r: &Report) {
     ));
 }
 
+/// where a screen's label goes: at `p`, kept inside `image` with room
+/// for about 200 x 20 px of text. on a preview smaller than that the upper
+/// bound would sit below the lower one, and f32::clamp panics on that, so
+/// the label pins to the top left corner instead
+fn label_at(p: Pos2, image: egui::Rect) -> Pos2 {
+    let lo = image.min + vec2(4.0, 30.0);
+    let hi = image.max - vec2(200.0, 20.0);
+    p.clamp(lo, pos2(hi.x.max(lo.x), hi.y.max(lo.y)))
+}
+
 fn quad(points: [Pos2; 4]) -> Vec<Pos2> {
     let mut v = points.to_vec();
     v.push(points[0]);
@@ -365,8 +375,7 @@ pub(crate) fn draw(ui: &egui::Ui, image: egui::Rect, size: (u32, u32), r: &Repor
                 }
             }
             let label = format!("{}: {}", sc.name.label(), view_text(r, sc.name));
-            let at = map(sc.outline[0])
-                .clamp(image.min + vec2(4.0, 30.0), image.max - vec2(200.0, 20.0));
+            let at = label_at(map(sc.outline[0]), image);
             let galley = painter.layout_no_wrap(label, FontId::proportional(15.0), c);
             painter.rect_filled(
                 egui::Rect::from_min_size(at, galley.size()).expand(3.0),
@@ -470,4 +479,23 @@ pub(crate) fn draw(ui: &egui::Ui, image: egui::Rect, size: (u32, u32), r: &Repor
         shadow,
     );
     painter.galley(at, galley, Color32::WHITE);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn label_fits_a_preview_narrower_than_the_label() {
+        let image = egui::Rect::from_min_size(pos2(10.0, 10.0), vec2(120.0, 40.0));
+        assert_eq!(label_at(pos2(500.0, 500.0), image), pos2(14.0, 40.0));
+        assert_eq!(label_at(pos2(0.0, 0.0), image), pos2(14.0, 40.0));
+    }
+
+    #[test]
+    fn label_stays_inside_a_large_preview() {
+        let image = egui::Rect::from_min_size(pos2(0.0, 0.0), vec2(640.0, 360.0));
+        assert_eq!(label_at(pos2(100.0, 100.0), image), pos2(100.0, 100.0));
+        assert_eq!(label_at(pos2(1000.0, 0.0), image), pos2(440.0, 30.0));
+    }
 }
