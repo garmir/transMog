@@ -33,6 +33,13 @@ enum Command {
         /// view; also the live control key `ndi_size`
         #[arg(long, value_name = "WxH", default_value = "640x360", value_parser = transmog::ndi::parse_size)]
         ndi_size: (u32, u32),
+        /// start in aim mode
+        #[arg(long)]
+        aim: bool,
+        /// where aim mode's "save calibration" writes
+        /// ($XDG_CONFIG_HOME/transmog/calibration.json by default)
+        #[arg(long, value_name = "FILE")]
+        calibration: Option<PathBuf>,
         /// read live `key value` lines from PATH instead of
         /// `<tap dir>/control`
         #[arg(long, value_name = "PATH")]
@@ -81,6 +88,8 @@ fn main() -> Result<()> {
         preset: None,
         ndi: false,
         ndi_size: transmog::ndi::DEFAULT_SIZE,
+        aim: false,
+        calibration: None,
         control_file: None,
         control: None,
     }) {
@@ -89,6 +98,8 @@ fn main() -> Result<()> {
             preset,
             ndi,
             ndi_size,
+            aim,
+            calibration,
             control_file,
             control,
         } => run_gui(
@@ -96,6 +107,8 @@ fn main() -> Result<()> {
             preset,
             ndi,
             ndi_size,
+            aim,
+            calibration,
             control_file,
             control,
         ),
@@ -103,11 +116,15 @@ fn main() -> Result<()> {
     }
 }
 
+// one argument a flag, as clap hands them over
+#[allow(clippy::too_many_arguments)]
 fn run_gui(
     tap: Option<PathBuf>,
     preset: Option<String>,
     ndi: bool,
     ndi_size: (u32, u32),
+    aim: bool,
+    calibration: Option<PathBuf>,
     control_file: Option<PathBuf>,
     control: Option<String>,
 ) -> Result<()> {
@@ -134,6 +151,10 @@ fn run_gui(
             if ndi {
                 app.set_ndi(true);
             }
+            if let Some(path) = calibration {
+                app.set_calibration_path(path);
+            }
+            app.set_aim(aim);
             if let Some(path) = control_file {
                 app.set_control_file(path);
             }

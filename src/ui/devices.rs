@@ -8,6 +8,7 @@ pub(crate) enum Event {
     SelectDevice(usize),
     Select(Selection),
     Toggle,
+    Aim,
 }
 
 /// one usb 2 isochronous endpoint moves at most 3072 bytes per 125 us
@@ -211,6 +212,13 @@ pub(crate) fn show_top_bar(ui: &mut egui::Ui, app: &App) -> Option<Event> {
 
         if ui.button("rescan").clicked() {
             event = Some(Event::Rescan);
+        }
+        if ui
+            .add(egui::Button::new("aim").selected(app.aim_on()))
+            .on_hover_text("aim mode, also the A key")
+            .clicked()
+        {
+            event = Some(Event::Aim);
         }
     });
     event
