@@ -335,3 +335,61 @@ second, with the table's stamp block, markers and toggles outlined, the
 decoded N, A and M, the decode share over the last 30 frames, the corner
 fit error and the geometry. the panel shows the same numbers, the lens
 terms and the thread's cpu time a frame.
+
+## deploy
+
+`deploy/deploy.sh [--dry-run] [--local-ci] COMMIT` moves a running
+transmog user unit onto a build of COMMIT and puts the previous build back
+when the new one does not come up healthy. it refuses a commit that is not
+on `origin/integration`, or whose github runs on integration have not all
+passed; `--local-ci` runs `nix flake check` at the commit in a temporary
+worktree instead. it then runs `nix build .#transmog` there with a gc
+rooted out-link and links the binary as `BIN_DIR/transmog-<sha>`, with
+`current` and `previous` beside it.
+
+the unit is one `systemd-run` made, so it disappears when it stops. deploy
+reads its arguments and properties (environment, working directory,
+output) from the transient unit file first, stops it, waits up to 10 s for
+tcp 5960 and 5961 to be free, and starts it again under the same name on
+the new binary. the wait is there because the ndi sdk moves to 5962 while
+an old socket still holds 5961, and the ssh tunnel to TouchDesigner
+carries 5960 and 5961 only. a deploy waits first while `PAUSE_FILE`
+exists.
+
+for `HEALTH_SECS` (20) the gates then check that:
+
+- the unit's pid stays alive and unrestarted;
+- the tap's `latest` advances at `MIN_FPS` (29) or more, with at most
+  `MAX_SEQ_GAPS` (10) frames missing from the v4l2 sequence in the slot
+  headers;
+- 5960 and 5961 are listened on by the new process and nothing else;
+- `control.state` was written since the start and, with `--control`, says
+  the websocket is connected;
+- each `HEALTH_CMDS` hook exits 0, such as a check of TouchDesigner's
+  received frames or the window placement.
+
+units in `RESTART_UNITS` are restarted once the new tap is up, since the
+tap starts over with the process. when any gate fails, `current` goes back
+to the previous build, `failed` names the one that failed, the previous
+build goes through the same gates, and deploy exits 1 (2 if that fails as
+well, 3 for a refusal). these are the failures of the 2026-11-05 qa night:
+ndi on 5962, the tap at 19 to 25 fps, and a process dead after a usb drop
+with nothing restarting it. `UNIT_PROPS=(Restart=on-failure RestartSec=2)`
+covers the last one from then on.
+
+`--dry-run` resolves the commit, checks ci, builds, links the binary as
+`BIN_DIR/staged` and prints the plan, without stopping or starting
+anything. each step goes to the deploy log with a timestamp, and
+`LOG_HOOK` gets a one-line summary of each stage.
+
+the machine's settings live in
+`${XDG_CONFIG_HOME:-$HOME/.config}/transmog/deploy.env`, or wherever
+`DEPLOY_ENV` points, never in the repo. `deploy/deploy.env.example` lists
+them all.
+
+`deploy/test.sh` runs the swap, gates and rollback against a throwaway
+`systemd-run` unit whose builds are python stubs: a fake tap at 30 fps,
+two free high ports in place of 5960 and 5961, and a `control.state`. it
+checks a good build, one at 22 fps, one on the wrong port and one that
+dies after 1.5 s, and stops its unit on exit. it builds nothing and checks
+no real camera.
