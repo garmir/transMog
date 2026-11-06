@@ -3,7 +3,7 @@ use eframe::wgpu;
 
 use crate::capture::Frame;
 use crate::fx;
-use crate::render::{Pass, Renderer};
+use crate::render::Renderer;
 
 /// egui ids for both ping-pong targets, registered once per set of
 /// targets; the views are kept to notice when the renderer swaps them
@@ -15,6 +15,8 @@ struct Bound {
 
 pub(crate) struct Preview {
     renderer: Renderer,
+    /// the egui_wgpu device, kept so the stack ui can build passes
+    device: wgpu::Device,
     bound: Option<Bound>,
     last_seq: Option<u64>,
     /// a new frame or a parameter change since the last render
@@ -24,9 +26,12 @@ pub(crate) struct Preview {
 impl Preview {
     pub fn new(rs: &RenderState) -> Preview {
         let mut renderer = Renderer::new(&rs.device, &rs.queue);
-        *renderer.passes_mut() = fx::default_stack(&rs.device, renderer.input_layout());
+        for pass in fx::default_stack(&rs.device, renderer.input_layout()) {
+            renderer.push_pass(pass);
+        }
         Preview {
             renderer,
+            device: rs.device.clone(),
             bound: None,
             last_seq: None,
             dirty: false,
@@ -39,8 +44,12 @@ impl Preview {
         self.last_seq = None;
     }
 
-    pub fn passes_mut(&mut self) -> &mut Vec<Box<dyn Pass>> {
-        self.renderer.passes_mut()
+    pub fn renderer_mut(&mut self) -> &mut Renderer {
+        &mut self.renderer
+    }
+
+    pub fn device(&self) -> &wgpu::Device {
+        &self.device
     }
 
     /// asks for a render even without a new frame, after a pass changed
@@ -66,13 +75,7 @@ impl Preview {
         }
         if self.dirty {
             self.dirty = false;
-            let mut encoder = rs
-                .device
-                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                    label: Some("preview"),
-                });
-            self.renderer.render(&rs.device, &rs.queue, &mut encoder);
-            rs.queue.submit(Some(encoder.finish()));
+            self.renderer.render(&rs.device, &rs.queue);
         }
 
         let (Some(views), Some(size)) = (self.renderer.target_views(), self.renderer.output_size())

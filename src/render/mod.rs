@@ -1,4 +1,8 @@
+use std::sync::atomic::{AtomicU64, Ordering};
+
 use crate::capture::{Frame, PixelLayout};
+
+pub mod kit;
 
 pub struct PassCtx<'a> {
     pub device: &'a wgpu::Device,
@@ -23,6 +27,31 @@ pub trait Pass: Send {
         input: &wgpu::TextureView,
         output: &wgpu::TextureView,
     );
+    /// true for a pass that works on the frame in main memory: the
+    /// renderer then reads the current target back, calls process_cpu
+    /// and uploads the result instead of calling encode
+    fn cpu(&self) -> bool {
+        false
+    }
+    /// tightly packed rgba8 rows, top row first, edited in place
+    fn process_cpu(&mut self, _rgba: &mut Vec<u8>, _width: u32, _height: u32) {}
+}
+
+/// a pass in the stack with an id that survives reordering, so the ui
+/// can key its widgets by it
+pub struct Slot {
+    pub id: u64,
+    pub pass: Box<dyn Pass>,
+}
+
+impl Slot {
+    pub fn new(pass: Box<dyn Pass>) -> Slot {
+        static NEXT: AtomicU64 = AtomicU64::new(1);
+        Slot {
+            id: NEXT.fetch_add(1, Ordering::Relaxed),
+            pass,
+        }
+    }
 }
 
 pub const TARGET_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
@@ -40,7 +69,7 @@ pub fn create_input_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
         entries: &[
             wgpu::BindGroupLayoutEntry {
                 binding: 0,
-                visibility: wgpu::ShaderStages::FRAGMENT,
+                visibility: wgpu::ShaderStages::VERTEX_FRAGMENT | wgpu::ShaderStages::COMPUTE,
                 ty: wgpu::BindingType::Texture {
                     sample_type: wgpu::TextureSampleType::Float { filterable: true },
                     view_dimension: wgpu::TextureViewDimension::D2,
@@ -50,7 +79,7 @@ pub fn create_input_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
             },
             wgpu::BindGroupLayoutEntry {
                 binding: 1,
-                visibility: wgpu::ShaderStages::FRAGMENT,
+                visibility: wgpu::ShaderStages::VERTEX_FRAGMENT | wgpu::ShaderStages::COMPUTE,
                 ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
                 count: None,
             },
@@ -163,6 +192,11 @@ pub fn yuyv_to_rgb(y: u8, cb: u8, cr: u8) -> [f32; 3] {
     ]
 }
 
+/// the row pitch a texture-to-buffer copy of `width` rgba8 texels needs
+pub fn padded_row_bytes(width: u32) -> u32 {
+    (width * 4).div_ceil(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT) * wgpu::COPY_BYTES_PER_ROW_ALIGNMENT
+}
+
 struct Target {
     texture: wgpu::Texture,
     view: wgpu::TextureView,
@@ -191,6 +225,13 @@ fn row_layout(layout: PixelLayout, width: u32) -> (u32, u32) {
     (bytes_per_row, padded_row)
 }
 
+/// the read-back buffer a cpu pass goes through, kept by size
+struct Staging {
+    buffer: wgpu::Buffer,
+    width: u32,
+    height: u32,
+}
+
 /// source texture, ping-pong targets and the pass stack
 pub struct Renderer {
     sampler: wgpu::Sampler,
@@ -201,12 +242,15 @@ pub struct Renderer {
     targets: Option<[Target; 2]>,
     /// which target holds the final image after the last render()
     output: usize,
-    passes: Vec<Box<dyn Pass>>,
+    passes: Vec<Slot>,
+    bypass: bool,
+    staging: Option<Staging>,
+    cpu_pixels: Vec<u8>,
 }
 
 impl Renderer {
     /// all intermediate textures are rgba8unorm with
-    /// RENDER_ATTACHMENT | TEXTURE_BINDING | COPY_SRC
+    /// RENDER_ATTACHMENT | TEXTURE_BINDING | COPY_SRC | COPY_DST
     pub fn new(device: &wgpu::Device, _queue: &wgpu::Queue) -> Renderer {
         let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("linear clamp"),
@@ -245,11 +289,18 @@ impl Renderer {
             targets: None,
             output: 0,
             passes: Vec::new(),
+            bypass: false,
+            staging: None,
+            cpu_pixels: Vec::new(),
         }
     }
 
     pub fn input_layout(&self) -> &wgpu::BindGroupLayout {
         &self.input_layout
+    }
+
+    pub fn sampler(&self) -> &wgpu::Sampler {
+        &self.sampler
     }
 
     /// recreates the textures when the size or layout changes
@@ -361,7 +412,8 @@ impl Renderer {
                 format: TARGET_FORMAT,
                 usage: wgpu::TextureUsages::RENDER_ATTACHMENT
                     | wgpu::TextureUsages::TEXTURE_BINDING
-                    | wgpu::TextureUsages::COPY_SRC,
+                    | wgpu::TextureUsages::COPY_SRC
+                    | wgpu::TextureUsages::COPY_DST,
                 view_formats: &[],
             });
             let view = texture.create_view(&Default::default());
@@ -377,22 +429,22 @@ impl Renderer {
         );
     }
 
-    /// runs the convert pass and then every enabled pass
-    pub fn render(
-        &mut self,
-        device: &wgpu::Device,
-        queue: &wgpu::Queue,
-        encoder: &mut wgpu::CommandEncoder,
-    ) {
+    /// runs the convert pass and then every enabled pass, submitting
+    /// the work itself; a cpu pass splits the submission in two around
+    /// a blocking read-back
+    pub fn render(&mut self, device: &wgpu::Device, queue: &wgpu::Queue) {
         let (Some(source), Some(targets)) = (&self.source, &self.targets) else {
             return;
         };
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("render"),
+        });
         let pipeline = match source.layout {
             PixelLayout::Yuyv => &self.convert_yuyv,
             PixelLayout::Rgba8 => &self.convert_copy,
         };
         draw_fullscreen(
-            encoder,
+            &mut encoder,
             "convert",
             pipeline,
             &[&source.bind_group],
@@ -407,11 +459,40 @@ impl Renderer {
             input_layout: &self.input_layout,
         };
         let mut current = 0;
-        for pass in self.passes.iter_mut().filter(|p| p.enabled()) {
-            let next = 1 - current;
-            pass.encode(&ctx, encoder, &targets[current].view, &targets[next].view);
-            current = next;
+        if !self.bypass {
+            for slot in self.passes.iter_mut() {
+                if !slot.pass.enabled() {
+                    continue;
+                }
+                let next = 1 - current;
+                if slot.pass.cpu() {
+                    queue.submit([encoder.finish()]);
+                    let ok = cpu_round_trip(
+                        &ctx,
+                        &mut self.staging,
+                        &mut self.cpu_pixels,
+                        slot.pass.as_mut(),
+                        &targets[current].texture,
+                        &targets[next].texture,
+                    );
+                    encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                        label: Some("render"),
+                    });
+                    if !ok {
+                        continue;
+                    }
+                } else {
+                    slot.pass.encode(
+                        &ctx,
+                        &mut encoder,
+                        &targets[current].view,
+                        &targets[next].view,
+                    );
+                }
+                current = next;
+            }
         }
+        queue.submit([encoder.finish()]);
         self.output = current;
     }
 
@@ -438,9 +519,147 @@ impl Renderer {
         self.source.as_ref().map(|s| (s.width, s.height))
     }
 
-    pub fn passes_mut(&mut self) -> &mut Vec<Box<dyn Pass>> {
+    pub fn passes_mut(&mut self) -> &mut Vec<Slot> {
         &mut self.passes
     }
+
+    pub fn passes(&self) -> &[Slot] {
+        &self.passes
+    }
+
+    pub fn push_pass(&mut self, pass: Box<dyn Pass>) {
+        self.passes.push(Slot::new(pass));
+    }
+
+    /// with bypass on the output is the converted frame and no pass runs
+    pub fn set_bypass(&mut self, on: bool) {
+        self.bypass = on;
+    }
+
+    pub fn bypass(&self) -> bool {
+        self.bypass
+    }
+}
+
+/// reads `input` back, runs the pass on it and uploads the result into
+/// `output`; false when the map failed, which leaves `output` untouched
+fn cpu_round_trip(
+    ctx: &PassCtx,
+    staging: &mut Option<Staging>,
+    pixels: &mut Vec<u8>,
+    pass: &mut dyn Pass,
+    input: &wgpu::Texture,
+    output: &wgpu::Texture,
+) -> bool {
+    let (width, height) = (ctx.width, ctx.height);
+    let padded_row = padded_row_bytes(width);
+    let fresh = staging
+        .as_ref()
+        .is_none_or(|s| s.width != width || s.height != height);
+    if fresh {
+        let buffer = ctx.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("cpu pass staging"),
+            size: u64::from(padded_row) * u64::from(height),
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        *staging = Some(Staging {
+            buffer,
+            width,
+            height,
+        });
+    }
+    let buffer = &staging.as_ref().expect("set above").buffer;
+    let mut encoder = ctx
+        .device
+        .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("cpu pass read back"),
+        });
+    encoder.copy_texture_to_buffer(
+        input.as_image_copy(),
+        wgpu::TexelCopyBufferInfo {
+            buffer,
+            layout: wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(padded_row),
+                rows_per_image: Some(height),
+            },
+        },
+        wgpu::Extent3d {
+            width,
+            height,
+            depth_or_array_layers: 1,
+        },
+    );
+    ctx.queue.submit([encoder.finish()]);
+
+    let slice = buffer.slice(..);
+    let (tx, rx) = std::sync::mpsc::channel();
+    slice.map_async(wgpu::MapMode::Read, move |r| {
+        tx.send(r).ok();
+    });
+    if let Err(e) = ctx.device.poll(wgpu::PollType::wait_indefinitely()) {
+        tracing::warn!(pass = pass.name(), "poll for the cpu pass failed: {e}");
+        return false;
+    }
+    match rx.recv() {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => {
+            tracing::warn!(
+                pass = pass.name(),
+                "mapping the cpu pass staging failed: {e}"
+            );
+            return false;
+        }
+        Err(_) => {
+            tracing::warn!(pass = pass.name(), "the map callback never ran");
+            return false;
+        }
+    }
+    let row = (width * 4) as usize;
+    {
+        let view = match slice.get_mapped_range() {
+            Ok(view) => view,
+            Err(e) => {
+                tracing::warn!(pass = pass.name(), "mapped range: {e}");
+                buffer.unmap();
+                return false;
+            }
+        };
+        pixels.resize(row * height as usize, 0);
+        for (dst, src) in pixels
+            .chunks_exact_mut(row)
+            .zip(view.chunks_exact(padded_row as usize))
+        {
+            dst.copy_from_slice(&src[..row]);
+        }
+    }
+    buffer.unmap();
+
+    pass.process_cpu(pixels, width, height);
+    if pixels.len() < row * height as usize {
+        tracing::warn!(
+            pass = pass.name(),
+            len = pixels.len(),
+            "the cpu pass shrank the frame, dropping its output"
+        );
+        return false;
+    }
+    ctx.queue.write_texture(
+        output.as_image_copy(),
+        &pixels[..row * height as usize],
+        wgpu::TexelCopyBufferLayout {
+            offset: 0,
+            bytes_per_row: Some(width * 4),
+            rows_per_image: Some(height),
+        },
+        wgpu::Extent3d {
+            width,
+            height,
+            depth_or_array_layers: 1,
+        },
+    );
+    true
 }
 
 #[cfg(test)]
@@ -477,6 +696,21 @@ pub(crate) mod tests {
         close(yuyv_to_rgb(235, 128, 128), [255, 255, 255]);
     }
 
+    #[test]
+    fn padded_rows_round_up_to_256() {
+        assert_eq!(padded_row_bytes(4), 256);
+        assert_eq!(padded_row_bytes(64), 256);
+        assert_eq!(padded_row_bytes(65), 512);
+        assert_eq!(padded_row_bytes(1280), 5120);
+    }
+
+    #[test]
+    fn slots_get_distinct_ids() {
+        let a = Slot::new(Box::new(Invert { enabled: true }));
+        let b = Slot::new(Box::new(Invert { enabled: true }));
+        assert_ne!(a.id, b.id);
+    }
+
     /// wgpu's request futures resolve without an executor on native
     /// targets, so a spin on a no-op waker is enough
     pub(crate) fn block_on<F: std::future::Future>(future: F) -> F::Output {
@@ -497,24 +731,22 @@ pub(crate) mod tests {
         block_on(adapter.request_device(&Default::default())).ok()
     }
 
-    /// reads the output texture back as tightly packed rgba8 rows
+    /// reads a texture back as tightly packed rgba8 rows
     pub(crate) fn read_back(
         device: &wgpu::Device,
         queue: &wgpu::Queue,
-        encoder: wgpu::CommandEncoder,
         texture: &wgpu::Texture,
         width: u32,
         height: u32,
     ) -> Vec<u8> {
-        let padded_row = (width * 4).div_ceil(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT)
-            * wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
+        let padded_row = padded_row_bytes(width);
         let buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("read back"),
             size: u64::from(padded_row * height),
             usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
             mapped_at_creation: false,
         });
-        let mut encoder = encoder;
+        let mut encoder = device.create_command_encoder(&Default::default());
         encoder.copy_texture_to_buffer(
             texture.as_image_copy(),
             wgpu::TexelCopyBufferInfo {
@@ -549,24 +781,57 @@ pub(crate) mod tests {
         out
     }
 
+    /// a grey yuyv frame of the given size, decoding to 130 everywhere
+    pub(crate) fn grey_frame(width: u32, height: u32) -> Frame {
+        Frame {
+            width,
+            height,
+            layout: PixelLayout::Yuyv,
+            data: vec![128; (width * height * 2) as usize],
+            seq: 1,
+            received: Instant::now(),
+        }
+    }
+
+    /// a yuyv frame whose left half is black and right half white
+    pub(crate) fn half_frame(width: u32, height: u32) -> Frame {
+        let mut data = Vec::with_capacity((width * height * 2) as usize);
+        for _ in 0..height {
+            for x in 0..width {
+                data.push(if x < width / 2 { 16 } else { 235 });
+                data.push(128);
+            }
+        }
+        Frame {
+            width,
+            height,
+            layout: PixelLayout::Yuyv,
+            data,
+            seq: 1,
+            received: Instant::now(),
+        }
+    }
+
+    /// renders the stack over a grey frame and returns the output pixels
+    pub(crate) fn render_grey(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        renderer: &mut Renderer,
+        width: u32,
+        height: u32,
+    ) -> Vec<u8> {
+        renderer.upload(device, queue, &grey_frame(width, height));
+        renderer.render(device, queue);
+        let texture = renderer.output_texture().expect("output after upload");
+        read_back(device, queue, texture, width, height)
+    }
+
     #[test]
     #[ignore = "needs a gpu"]
     fn gpu_converts_a_yuyv_frame_to_grey() {
         let (device, queue) = headless_device().expect("no gpu adapter");
         let mut renderer = Renderer::new(&device, &queue);
-        let frame = Frame {
-            width: 4,
-            height: 2,
-            layout: PixelLayout::Yuyv,
-            data: vec![128; 4 * 2 * 2],
-            seq: 1,
-            received: Instant::now(),
-        };
-        renderer.upload(&device, &queue, &frame);
-        let mut encoder = device.create_command_encoder(&Default::default());
-        renderer.render(&device, &queue, &mut encoder);
-        let texture = renderer.output_texture().expect("output after upload");
-        let pixels = read_back(&device, &queue, encoder, texture, 4, 2);
+        let pixels = render_grey(&device, &queue, &mut renderer, 4, 2);
         assert_eq!(pixels.len(), 4 * 2 * 4);
         for px in pixels.chunks_exact(4) {
             for c in &px[..3] {
@@ -574,5 +839,78 @@ pub(crate) mod tests {
             }
             assert_eq!(px[3], 255);
         }
+    }
+
+    struct Invert {
+        enabled: bool,
+    }
+
+    impl Pass for Invert {
+        fn name(&self) -> &'static str {
+            "invert"
+        }
+        fn enabled(&self) -> bool {
+            self.enabled
+        }
+        fn set_enabled(&mut self, on: bool) {
+            self.enabled = on;
+        }
+        fn ui(&mut self, _ui: &mut egui::Ui) {}
+        fn encode(
+            &mut self,
+            _ctx: &PassCtx,
+            _encoder: &mut wgpu::CommandEncoder,
+            _input: &wgpu::TextureView,
+            _output: &wgpu::TextureView,
+        ) {
+            unreachable!("a cpu pass is never encoded");
+        }
+        fn cpu(&self) -> bool {
+            true
+        }
+        fn process_cpu(&mut self, rgba: &mut Vec<u8>, _width: u32, _height: u32) {
+            for px in rgba.chunks_exact_mut(4) {
+                for c in &mut px[..3] {
+                    *c = 255 - *c;
+                }
+            }
+        }
+    }
+
+    /// a 70 px wide frame pads its rows to 512 bytes, so the unpad and
+    /// repack paths both run; grey 130 inverts to 125
+    #[test]
+    #[ignore = "needs a gpu"]
+    fn gpu_cpu_pass_inverts_the_frame() {
+        let (device, queue) = headless_device().expect("no gpu adapter");
+        let mut renderer = Renderer::new(&device, &queue);
+        renderer.push_pass(Box::new(Invert { enabled: true }));
+        let pixels = render_grey(&device, &queue, &mut renderer, 70, 3);
+        assert_eq!(renderer.output_index(), 1);
+        for px in pixels.chunks_exact(4) {
+            for c in &px[..3] {
+                assert!(
+                    (i32::from(*c) - 125).abs() <= 2,
+                    "pixel {px:?} is not inverted"
+                );
+            }
+            assert_eq!(px[3], 255);
+        }
+        // a second render reuses the staging buffer and the pixel vec
+        renderer.render(&device, &queue);
+        let again = read_back(&device, &queue, renderer.output_texture().unwrap(), 70, 3);
+        assert_eq!(again, pixels);
+    }
+
+    #[test]
+    #[ignore = "needs a gpu"]
+    fn gpu_bypass_skips_every_pass() {
+        let (device, queue) = headless_device().expect("no gpu adapter");
+        let mut renderer = Renderer::new(&device, &queue);
+        renderer.push_pass(Box::new(Invert { enabled: true }));
+        renderer.set_bypass(true);
+        let pixels = render_grey(&device, &queue, &mut renderer, 4, 2);
+        assert_eq!(renderer.output_index(), 0);
+        assert!(pixels.chunks_exact(4).all(|px| px[0] == 130));
     }
 }

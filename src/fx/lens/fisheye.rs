@@ -1,9 +1,7 @@
 use bytemuck::{Pod, Zeroable};
 
-use crate::render::{
-    create_fullscreen_pipeline, create_input_bind_group, draw_fullscreen, fullscreen_vertex_source,
-    Pass, PassCtx,
-};
+use crate::render::kit::{build_shader, InputGroupCache, UniformBuffer};
+use crate::render::{create_fullscreen_pipeline, draw_fullscreen, Pass, PassCtx};
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Projection {
@@ -139,56 +137,20 @@ pub struct Fisheye {
     edge: Edge,
     centre: [f32; 2],
     pipeline: wgpu::RenderPipeline,
-    uniform: wgpu::Buffer,
-    uniform_group: wgpu::BindGroup,
-    /// input bind group reused while the input view stays the same
-    input_group: Option<(wgpu::TextureView, wgpu::BindGroup)>,
+    uniform: UniformBuffer<Uniform>,
+    input: InputGroupCache,
 }
 
 impl Fisheye {
     pub fn new(device: &wgpu::Device, input_layout: &wgpu::BindGroupLayout) -> Fisheye {
-        let source = format!(
-            "{}\n{}",
-            fullscreen_vertex_source(),
-            include_str!("fisheye.wgsl")
-        );
-        let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("fisheye"),
-            source: wgpu::ShaderSource::Wgsl(source.into()),
-        });
-        let uniform_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("fisheye params"),
-            entries: &[wgpu::BindGroupLayoutEntry {
-                binding: 0,
-                visibility: wgpu::ShaderStages::FRAGMENT,
-                ty: wgpu::BindingType::Buffer {
-                    ty: wgpu::BufferBindingType::Uniform,
-                    has_dynamic_offset: false,
-                    min_binding_size: wgpu::BufferSize::new(std::mem::size_of::<Uniform>() as u64),
-                },
-                count: None,
-            }],
-        });
+        let module = build_shader(device, "fisheye", include_str!("fisheye.wgsl"));
+        let uniform = UniformBuffer::<Uniform>::new(device, "fisheye params");
         let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("fisheye"),
-            bind_group_layouts: &[Some(input_layout), Some(&uniform_layout)],
+            bind_group_layouts: &[Some(input_layout), Some(&uniform.layout)],
             immediate_size: 0,
         });
         let pipeline = create_fullscreen_pipeline(device, "fisheye", &module, "fs_main", &layout);
-        let uniform = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("fisheye params"),
-            size: std::mem::size_of::<Uniform>() as u64,
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        let uniform_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("fisheye params"),
-            layout: &uniform_layout,
-            entries: &[wgpu::BindGroupEntry {
-                binding: 0,
-                resource: uniform.as_entire_binding(),
-            }],
-        });
         let mut fisheye = Fisheye {
             enabled: true,
             projection: DEFAULT_PROJECTION,
@@ -204,8 +166,7 @@ impl Fisheye {
             centre: [0.0, 0.0],
             pipeline,
             uniform,
-            uniform_group,
-            input_group: None,
+            input: InputGroupCache::new(),
         };
         fisheye.reset();
         fisheye
@@ -451,25 +412,14 @@ impl Pass for Fisheye {
         input: &wgpu::TextureView,
         output: &wgpu::TextureView,
     ) {
-        ctx.queue.write_buffer(
-            &self.uniform,
-            0,
-            bytemuck::bytes_of(&self.uniform(ctx.width, ctx.height)),
-        );
-        let stale = self
-            .input_group
-            .as_ref()
-            .is_none_or(|(view, _)| view != input);
-        if stale {
-            let group = create_input_bind_group(ctx.device, ctx.input_layout, input, ctx.sampler);
-            self.input_group = Some((input.clone(), group));
-        }
-        let (_, input_group) = self.input_group.as_ref().expect("set above");
+        self.uniform
+            .write(ctx.queue, &self.uniform(ctx.width, ctx.height));
+        let input_group = self.input.get(ctx, input);
         draw_fullscreen(
             encoder,
             "fisheye",
             &self.pipeline,
-            &[input_group, &self.uniform_group],
+            &[input_group, &self.uniform.group],
             output,
         );
     }
@@ -530,28 +480,15 @@ mod tests {
     #[test]
     #[ignore = "needs a gpu"]
     fn gpu_identity_keeps_grey() {
-        use crate::capture::{Frame, PixelLayout};
-        use crate::render::tests::{headless_device, read_back};
+        use crate::render::tests::{headless_device, render_grey};
         use crate::render::Renderer;
 
         let (device, queue) = headless_device().expect("no gpu adapter");
         let mut renderer = Renderer::new(&device, &queue);
         let mut fisheye = Fisheye::new(&device, renderer.input_layout());
         fisheye.set_identity();
-        renderer.passes_mut().push(Box::new(fisheye));
-        let frame = Frame {
-            width: 4,
-            height: 2,
-            layout: PixelLayout::Yuyv,
-            data: vec![128; 4 * 2 * 2],
-            seq: 1,
-            received: std::time::Instant::now(),
-        };
-        renderer.upload(&device, &queue, &frame);
-        let mut encoder = device.create_command_encoder(&Default::default());
-        renderer.render(&device, &queue, &mut encoder);
-        let texture = renderer.output_texture().expect("output after upload");
-        let pixels = read_back(&device, &queue, encoder, texture, 4, 2);
+        renderer.push_pass(Box::new(fisheye));
+        let pixels = render_grey(&device, &queue, &mut renderer, 4, 2);
         for px in pixels.chunks_exact(4) {
             for c in &px[..3] {
                 assert!((i32::from(*c) - 130).abs() <= 2, "pixel {px:?} is not grey");

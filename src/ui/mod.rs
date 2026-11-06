@@ -215,11 +215,12 @@ impl App {
                 egui::ScrollArea::vertical()
                     .auto_shrink([false, false])
                     .show(ui, |ui| {
-                        egui::CollapsingHeader::new("lens")
+                        egui::CollapsingHeader::new("effects")
                             .default_open(true)
                             .show(ui, |ui| {
                                 if let Some(preview) = &mut self.preview {
-                                    fx_panel::show(ui, preview.passes_mut());
+                                    let device = preview.device().clone();
+                                    fx_panel::show(ui, preview.renderer_mut(), &device);
                                     // Pass::ui reports no change, so any input
                                     // that can edit a widget counts as one
                                     if edited_this_frame(ui.ctx()) {
