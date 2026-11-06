@@ -144,9 +144,9 @@ content moves, by a change from either source or from the window:
     ndi on
     file /run/user/1000/transmog/tap/control
     ws ws://192.168.1.242:9980/viz_ctrl/ws connected
-    set zoom_absolute 150 150 ok ws:7644
+    set fisheye_k1 0.3 0.3 ok ws:7644
     set gain 200 159 locked file
-    cam zoom_absolute 150
+    cam zoom_absolute 100
     lens fisheye_lens_fov 180
 
 a `set` line is `KEY WANTED GOT STATUS SOURCE [MESSAGE]`, the status one of
@@ -157,13 +157,15 @@ lines every pass parameter.
 
 `qa_lock`, on from the start, holds exposure_time_absolute, auto_exposure,
 exposure_dynamic_framerate, gain, focus_absolute,
-focus_automatic_continuous, white_balance_* and power_line_frequency at
-the `qa` preset's values, because the latency ruler decodes stamp cells
-off the camera picture and a moving exposure smears them. a held key from
+focus_automatic_continuous, white_balance_*, power_line_frequency,
+zoom_absolute, pan_absolute and tilt_absolute at the `qa` preset's values.
+the latency ruler decodes stamp cells off the camera picture: a moving
+exposure smears them, and its screen calibration is in camera pixels, so
+digital zoom, pan or tilt moves the cells off their quads. a held key from
 either source is reported `locked` and not written, the window greys those
 widgets out, another preset skips them, and turning the lock back on, or
-"reset all", writes the qa values again. zoom, pan, tilt and the pass
-parameters are never held. the lock does nothing while no `qa` preset
+"reset all", writes the qa values again. the pass parameters are never
+held; they act after the tap, so the ruler never sees them. the lock does nothing while no `qa` preset
 exists. the checkbox under "live control" turns it off.
 
 the websocket client is std only and speaks plain `ws://`: text frames,

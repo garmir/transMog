@@ -223,6 +223,13 @@ impl App {
                     source,
                 },
                 _ => match self.set_pass_param(&key, &value) {
+                    // a menu sent as its index reads back as its label
+                    Some(Ok(got)) if live::float(&got).is_none() => Report {
+                        wanted: value.clone(),
+                        got: Some(got),
+                        status: Status::Ok,
+                        source,
+                    },
                     Some(Ok(got)) => Report::checked(&value, Some(got), source),
                     Some(Err(e)) => error(&value, &e, source),
                     None => {
@@ -389,7 +396,10 @@ pub(super) fn show(ui: &mut egui::Ui, app: &mut App) {
     let mut lock = app.live.qa_lock;
     if ui
         .checkbox(&mut lock, "qa lock")
-        .on_hover_text("holds exposure, gain, focus, white balance and power line at the qa preset")
+        .on_hover_text(
+            "holds exposure, gain, focus, white balance, power line, zoom, pan and tilt \
+             at the qa preset",
+        )
         .changed()
     {
         app.set_qa_lock(lock);

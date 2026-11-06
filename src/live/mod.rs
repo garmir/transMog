@@ -14,11 +14,16 @@ pub mod json;
 pub mod ws;
 
 /// the controls the qa preset fixes. the latency ruler decodes stamp
-/// cells off the camera picture and needs the exposure to stay put
+/// cells off the camera picture and needs the exposure to stay put, and
+/// its screen calibration is in camera pixels, so digital zoom, pan and
+/// tilt would move the cells off their quads
 pub fn is_locked(key: &str) -> bool {
     matches!(
         key,
         "exposure_time_absolute"
+            | "zoom_absolute"
+            | "pan_absolute"
+            | "tilt_absolute"
             | "auto_exposure"
             | "exposure_dynamic_framerate"
             | "gain"
@@ -309,9 +314,11 @@ mod tests {
     }
 
     #[test]
-    fn lock_covers_the_qa_exposure_but_not_the_framing() {
+    fn lock_covers_the_qa_exposure_and_framing_but_not_the_lens() {
         for key in [
             "exposure_time_absolute",
+            "zoom_absolute",
+            "tilt_absolute",
             "auto_exposure",
             "gain",
             "focus_absolute",
@@ -321,7 +328,7 @@ mod tests {
         ] {
             assert!(is_locked(key), "{key}");
         }
-        for key in ["zoom_absolute", "pan_absolute", "brightness", "fisheye_k1"] {
+        for key in ["brightness", "contrast", "fisheye_k1", "fisheye_enabled"] {
             assert!(!is_locked(key), "{key}");
         }
     }
