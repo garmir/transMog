@@ -4,6 +4,7 @@ use std::time::Instant;
 use egui::{pos2, vec2, Color32, FontId, Pos2, Stroke};
 
 use crate::aim::{FitRun, Hint, Limits, Name, Ptz, Report};
+use crate::rect;
 
 pub(crate) enum Event {
     /// one of Ptz::CONTROLS to a value
@@ -12,6 +13,9 @@ pub(crate) enum Event {
     StopFit,
     ResetFraming,
     Save,
+    /// the rectified screens side by side in place of the camera picture
+    Rectified(bool),
+    FitLens(bool),
 }
 
 #[derive(Default)]
@@ -23,6 +27,7 @@ pub(crate) struct State {
     pub saved: String,
     /// wanted against read back after the last framing write
     pub readback: Vec<(&'static str, i64, Option<i64>)>,
+    pub rectified: bool,
 }
 
 const PROJ: Color32 = Color32::from_rgb(255, 150, 40);
@@ -30,7 +35,7 @@ const MINI: Color32 = Color32::from_rgb(70, 200, 255);
 const TARGET: Color32 = Color32::from_rgb(90, 230, 110);
 const HINT: Color32 = Color32::from_rgb(255, 225, 60);
 
-fn colour(name: Name) -> Color32 {
+pub(crate) fn colour(name: Name) -> Color32 {
     match name {
         Name::Projector => PROJ,
         Name::Mini => MINI,
@@ -70,12 +75,36 @@ pub(crate) fn show(
     report: Option<&Report>,
     framing: Option<(Ptz, Limits)>,
     calibration: &Path,
+    rectify: Option<(&rect::Rectify, Option<&rect::Report>)>,
 ) -> Vec<Event> {
     let mut events = Vec::new();
     match report {
         Some(r) => show_report(ui, r),
         None => {
             ui.weak("waiting for the first analysis");
+        }
+    }
+    ui.separator();
+    let mut on = state.rectified;
+    if ui
+        .checkbox(&mut on, "rectified screens (R)")
+        .on_hover_text("each screen mapped back to straight frame pixels, side by side")
+        .changed()
+    {
+        events.push(Event::Rectified(on));
+    }
+    match rectify {
+        Some((r, report)) => {
+            let mut fit = r.fit_lens();
+            if ui.checkbox(&mut fit, "fit lens k1 k2").changed() {
+                events.push(Event::FitLens(fit));
+            }
+            if let Some(rep) = report {
+                show_rect_report(ui, rep, r.writing());
+            }
+        }
+        None => {
+            ui.weak("rectify is off; the checkbox starts it");
         }
     }
     ui.separator();
@@ -141,6 +170,50 @@ pub(crate) fn show(
         ui.monospace(&state.saved);
     }
     events
+}
+
+fn show_rect_report(ui: &mut egui::Ui, r: &rect::Report, writing: bool) {
+    for s in &r.screens {
+        let rec = &s.record;
+        let g = &rec.geometry;
+        ui.colored_label(
+            colour(rec.name),
+            format!(
+                "{}: fit {:.2} px rms, {:.2} max, fids {:?}",
+                rec.name.label(),
+                rec.rms,
+                rec.worst,
+                rec.ids
+            ),
+        );
+        ui.monospace(format!(
+            "scale {:.3} ({:.3} x {:.3}) rot {:+.1}° skew {:+.1}°",
+            g.scale, g.scale_x, g.scale_y, g.rotation, g.skew
+        ));
+        ui.monospace(format!(
+            "keystone h {:+.1}% v {:+.1}%, view {:.0}°",
+            g.keystone_h, g.keystone_v, g.view
+        ));
+    }
+    let lens = match r.lens_fit {
+        Some((before, after)) => format!(
+            "lens k1 {:+.4} k2 {:+.4}, fit {before:.2} -> {after:.2} px",
+            r.lens.k1, r.lens.k2
+        ),
+        None => format!("lens k1 {:+.4} k2 {:+.4}", r.lens.k1, r.lens.k2),
+    };
+    ui.monospace(lens);
+    ui.weak(format!(
+        "{:.1} ms cpu a frame, {} frames, {} skipped, {}",
+        r.cpu_ms,
+        r.frames,
+        r.skipped,
+        if writing {
+            format!("{} written, {} errors", r.written, r.write_errors)
+        } else {
+            "not written (no tap)".into()
+        }
+    ));
 }
 
 fn show_report(ui: &mut egui::Ui, r: &Report) {

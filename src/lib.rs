@@ -4,5 +4,6 @@ pub mod controls;
 pub mod fx;
 pub mod live;
 pub mod ndi;
+pub mod rect;
 pub mod render;
 pub mod ui;

@@ -6,6 +6,7 @@ mod live;
 mod overlay;
 mod preview;
 mod qa_panel;
+mod rect_view;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -20,6 +21,7 @@ use crate::capture::{
 };
 use crate::controls::preset::{self, ctl_name, Preset, PresetFormat, Readback};
 use crate::controls::{ControlInfo, ControlKind, Controls};
+use crate::rect::{self, Rectify};
 
 const CONTROL_REFRESH: Duration = Duration::from_secs(1);
 /// how long a framing write gets to land before the fit reads a picture
@@ -60,6 +62,11 @@ pub struct App {
     aim_ui: aim_panel::State,
     calibration: PathBuf,
     live: live::Live,
+    /// the rectifier, from --rect or the aim panel's checkbox; it writes
+    /// beside the tap while the tap is on
+    rect: Option<Rectify>,
+    rect_scale: f32,
+    rect_textures: rect_view::Textures,
 }
 
 impl App {
@@ -98,6 +105,9 @@ impl App {
             aim_ui: aim_panel::State::default(),
             calibration: preset::dir().with_file_name("calibration.json"),
             live: live::Live::new(tap::default_dir().join("control")),
+            rect: None,
+            rect_scale: rect::DEFAULT_SCALE,
+            rect_textures: rect_view::Textures::default(),
         };
         app.status = if app.preview.is_none() {
             "no wgpu render state: the preview needs the wgpu backend".into()
@@ -233,6 +243,9 @@ impl App {
                 if let Some(aim) = &self.aim {
                     aim.set_source(Some(capture.source()));
                 }
+                if let Some(r) = &self.rect {
+                    r.set_source(Some(capture.source()));
+                }
                 self.capture = Some(capture);
             }
             Err(e) => {
@@ -265,6 +278,9 @@ impl App {
         if let Some(aim) = &self.aim {
             aim.set_source(None);
         }
+        if let Some(r) = &self.rect {
+            r.set_source(None);
+        }
     }
 
     pub fn aim_on(&self) -> bool {
@@ -288,6 +304,52 @@ impl App {
             aim.set_zoom(ptz.zoom);
         }
         self.aim = Some(aim);
+    }
+
+    pub fn rect_on(&self) -> bool {
+        self.rect.is_some()
+    }
+
+    /// tile pixels a frame pixel for the rectified tiles, from the next
+    /// start of the rectifier
+    pub fn set_rect_scale(&mut self, scale: f32) {
+        self.rect_scale = scale;
+    }
+
+    /// the rectifier thread; it writes rect-<screen> beside the tap while
+    /// the tap is on
+    pub fn set_rect(&mut self, on: bool) {
+        if on == self.rect.is_some() {
+            return;
+        }
+        if !on {
+            self.rect = None;
+            self.aim_ui.rectified = false;
+            return;
+        }
+        let out = self.tap.is_some().then(|| self.tap_dir.clone());
+        let r = Rectify::start(
+            self.capture.as_ref().map(Capture::source),
+            out,
+            self.rect_scale,
+        );
+        let ctx = self.ctx.clone();
+        r.set_wake(move || ctx.request_repaint());
+        if let Some((ptz, _)) = self.framing() {
+            r.set_zoom(ptz.zoom);
+        }
+        r.set_preview(self.aim_ui.rectified);
+        self.rect = Some(r);
+    }
+
+    fn set_rectified_view(&mut self, on: bool) {
+        self.aim_ui.rectified = on;
+        if on {
+            self.set_rect(true);
+        }
+        if let Some(r) = &self.rect {
+            r.set_preview(on);
+        }
     }
 
     /// where "save calibration" writes
@@ -354,6 +416,9 @@ impl App {
         if let (Some(aim), Some(p)) = (&self.aim, got) {
             aim.set_zoom(p.zoom);
         }
+        if let (Some(r), Some(p)) = (&self.rect, got) {
+            r.set_zoom(p.zoom);
+        }
     }
 
     fn apply_aim_event(&mut self, event: aim_panel::Event) {
@@ -385,6 +450,12 @@ impl App {
                 });
             }
             aim_panel::Event::Save => self.save_calibration(),
+            aim_panel::Event::Rectified(on) => self.set_rectified_view(on),
+            aim_panel::Event::FitLens(on) => {
+                if let Some(r) = &self.rect {
+                    r.set_fit_lens(on);
+                }
+            }
         }
     }
 
@@ -475,6 +546,9 @@ impl App {
             if let Some(capture) = &self.capture {
                 capture.set_tap(None);
             }
+            if let Some(r) = &self.rect {
+                r.set_out(None);
+            }
             return;
         };
         match Tap::open(&dir, tap::DEFAULT_SLOTS) {
@@ -486,6 +560,9 @@ impl App {
                 self.tap = Some(tap);
                 self.overlay = overlay::Overlay::new(dir.join("overlay"));
                 self.follow_tap_dir(&dir);
+                if let Some(r) = &self.rect {
+                    r.set_out(Some(dir.clone()));
+                }
                 self.tap_dir = dir;
             }
             Err(e) => self.status = format!("tap: {e:#}"),
@@ -678,6 +755,7 @@ impl App {
         let mut qa_events = Vec::new();
         let mut aim_events = Vec::new();
         let aim_report = self.aim.as_ref().and_then(Aim::report);
+        let rect_report = self.rect.as_ref().and_then(Rectify::report);
         let framing = self.framing();
         egui::Panel::right("side")
             .resizable(true)
@@ -697,6 +775,7 @@ impl App {
                                         aim_report.as_deref(),
                                         framing,
                                         &self.calibration,
+                                        self.rect.as_ref().map(|r| (r, rect_report.as_deref())),
                                     );
                                 });
                         }
@@ -774,6 +853,15 @@ impl App {
             preview.render(rs);
         }
         let aim = self.aim.as_ref().and_then(Aim::report);
+        if aim.is_some() && self.aim_ui.rectified {
+            let report = self.rect.as_ref().and_then(Rectify::report);
+            egui::CentralPanel::default()
+                .frame(egui::Frame::NONE.fill(egui::Color32::from_gray(12)))
+                .show(ui, |ui| {
+                    rect_view::show(ui, report.as_deref(), &mut self.rect_textures);
+                });
+            return;
+        }
         // aim mode draws its own outlines in place of the file's
         let overlay = self.show_overlay && self.tap.is_some() && self.aim.is_none();
         egui::CentralPanel::default()
@@ -837,10 +925,17 @@ impl App {
             if let (Some(aim), Some((ptz, _))) = (&self.aim, self.framing()) {
                 aim.set_zoom(ptz.zoom);
             }
+            if let (Some(r), Some((ptz, _))) = (&self.rect, self.framing()) {
+                r.set_zoom(ptz.zoom);
+            }
         }
         let plain_a = ui.input(|i| i.key_pressed(egui::Key::A) && i.modifiers.is_none());
         if plain_a && !ui.ctx().egui_wants_keyboard_input() {
             self.set_aim(!self.aim_on());
+        }
+        let plain_r = ui.input(|i| i.key_pressed(egui::Key::R) && i.modifiers.is_none());
+        if plain_r && self.aim_on() && !ui.ctx().egui_wants_keyboard_input() {
+            self.set_rectified_view(!self.aim_ui.rectified);
         }
         self.tick_fit();
         self.tick_live();

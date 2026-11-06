@@ -312,6 +312,15 @@ impl FrameSource {
             .as_ref()
             .map(|(f, _)| Arc::clone(f))
     }
+
+    /// the newest frame with its tap seq and kernel timestamp
+    pub fn latest_with_meta(&self) -> Option<(Arc<Frame>, FrameMeta)> {
+        self.shared
+            .latest
+            .lock()
+            .as_ref()
+            .map(|(f, m)| (Arc::clone(f), *m))
+    }
 }
 
 /// owns a capture thread that stops on drop

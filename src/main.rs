@@ -48,6 +48,13 @@ enum Command {
         /// assets.camera.transmog, e.g. ws://192.168.1.242:9980/viz_ctrl/ws
         #[arg(long, value_name = "URL")]
         control: Option<String>,
+        /// rectify each screen from its fiducials and write the marks'
+        /// regions to <tap dir>/rect-<screen> while the tap is on
+        #[arg(long)]
+        rect: bool,
+        /// rectified tile pixels a frame pixel
+        #[arg(long, value_name = "F", default_value_t = transmog::rect::DEFAULT_SCALE)]
+        rect_scale: f32,
     },
     /// list, save or apply camera presets without the window
     Preset {
@@ -92,6 +99,8 @@ fn main() -> Result<()> {
         calibration: None,
         control_file: None,
         control: None,
+        rect: false,
+        rect_scale: transmog::rect::DEFAULT_SCALE,
     }) {
         Command::Gui {
             tap,
@@ -102,6 +111,8 @@ fn main() -> Result<()> {
             calibration,
             control_file,
             control,
+            rect,
+            rect_scale,
         } => run_gui(
             tap.map(|dir| dir.unwrap_or_else(capture::tap::default_dir)),
             preset,
@@ -111,6 +122,7 @@ fn main() -> Result<()> {
             calibration,
             control_file,
             control,
+            rect.then_some(rect_scale),
         ),
         Command::Preset { action } => run_preset(action),
     }
@@ -127,6 +139,7 @@ fn run_gui(
     calibration: Option<PathBuf>,
     control_file: Option<PathBuf>,
     control: Option<String>,
+    rect: Option<f32>,
 ) -> Result<()> {
     let options = eframe::NativeOptions {
         renderer: eframe::Renderer::Wgpu,
@@ -155,6 +168,10 @@ fn run_gui(
                 app.set_calibration_path(path);
             }
             app.set_aim(aim);
+            if let Some(scale) = rect {
+                app.set_rect_scale(scale);
+                app.set_rect(true);
+            }
             if let Some(path) = control_file {
                 app.set_control_file(path);
             }

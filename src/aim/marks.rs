@@ -52,6 +52,24 @@ impl Rect {
     pub fn width(self) -> f32 {
         self.x1 - self.x0
     }
+
+    pub fn height(self) -> f32 {
+        self.y1 - self.y0
+    }
+
+    /// grown by `d` frame pixels on every side
+    pub fn grow(self, d: f32) -> Rect {
+        Rect {
+            x0: self.x0 - d,
+            y0: self.y0 - d,
+            x1: self.x1 + d,
+            y1: self.y1 + d,
+        }
+    }
+
+    pub fn centre(self) -> Pos2 {
+        pos2((self.x0 + self.x1) / 2.0, (self.y0 + self.y1) / 2.0)
+    }
 }
 
 pub const FRAME: Rect = Rect::new(0.0, 0.0, 1920.0, 1080.0);
@@ -61,6 +79,12 @@ pub const RULER: Rect = Rect::new(0.0, 96.0, 1920.0, 32.0);
 
 pub const STAMPS: Rect = Rect::new(336.0, 160.0, 500.0, 240.0);
 pub const STAMP_QUIET: f32 = 16.0;
+
+/// the two-cell toggles, each with its quiet border: the key mark flips
+/// on every note-on, mid and bottom on every frame
+pub const KEY: (Rect, f32) = (Rect::new(336.0, 440.0, 224.0, 56.0), 24.0);
+pub const MID: (Rect, f32) = (Rect::new(316.0, 544.0, 104.0, 40.0), 8.0);
+pub const BOTTOM: (Rect, f32) = (Rect::new(1264.0, 992.0, 104.0, 40.0), 8.0);
 const COLS: usize = 10;
 const LINES: usize = 6;
 

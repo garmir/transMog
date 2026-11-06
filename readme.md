@@ -233,3 +233,105 @@ allows, centres the screens with pan and tilt, learning how far a step
 moves the picture from its first one, and zooms in again; "reset
 framing" goes back to 100, 0, 0. the fit has only run against a model of
 the camera in `src/aim/fit.rs`'s test, not on the c920.
+
+## rectified tiles
+
+`transmog gui --rect`, or the "rectified screens" checkbox in the aim
+panel, maps each visualiser screen back to straight frame pixels and,
+while the tap is on, writes the marks' regions of every camera frame
+beside it. the decoders then read cells that are square, evenly sampled
+and the same size on both screens, whatever angle the camera sees them
+from. the displays themselves are drawn as they always were; all the
+correction is in the camera feed.
+
+on a thread of its own, from the decoded frame before any gpu pass:
+
+- every 2 s, and within 250 ms of losing a marker, a full search finds
+  the screens as aim mode does, then looks for any marker it missed near
+  where the refined ones put it (two markers at the left fix only an
+  affine map, which on a keystoned screen puts the right-hand ones over
+  two marker sides off);
+- every frame, each marker's white frame is cut by profiles across its
+  sides, the grey crossings are fitted with lines, and the lines meet in
+  sub-pixel corners, 8 a marker (outer and inner edge of the white
+  frame). moves under 1 px are smoothed (0.3 of the step a frame), larger
+  ones are taken at once; a marker that fails three frames running is
+  dropped and the screen searched again;
+- each screen gets its own homography (one marker: rotation and scale,
+  two: affine, three or four: projective) and every 30 frames one radial
+  lens fit, k1 alone or k1 and k2 with two screens of three markers or
+  more, is fitted across them. it is taken, smoothed, only when it lowers
+  the corner rms by 10 %. the "fit lens k1 k2" checkbox turns it off;
+- the regions are resampled with bilinear taps at `--rect-scale` tile
+  pixels a frame pixel (0.5 by default: native for the projector, four
+  times the camera's pixels for the mini). where a tile pixel spans more
+  than one camera pixel it averages n x n taps, n up to 4.
+
+the tiles, in frame pixels:
+
+| tile | x0 | y0 | x1 | y1 | holds |
+| --- | --- | --- | --- | --- | --- |
+| `ruler` | 0 | 88 | 520 | 136 | the ruler's row 3, left 512 px |
+| `stamps` | 320 | 144 | 852 | 416 | the stamp block and its quiet border |
+| `key` | 312 | 416 | 584 | 520 | the key toggle |
+| `mid` | 308 | 536 | 428 | 592 | the mid frame toggle |
+| `bottom` | 1256 | 984 | 1376 | 1040 | the bottom frame toggle |
+| `fid0` | 72 | 144 | 296 | 368 | fiducial 0, which tells the layouts apart |
+
+`DIR/rect-proj/` and `DIR/rect-mini/`, DIR the tap's directory:
+
+- `NNN.rect`, NNN = seq % 64, seq the tap's seq of the source frame (the
+  capture's frame count with the tap off), so a reader of tap slot NNN
+  finds the same frame's tiles under the same name. written through a
+  dot file and a rename, as the tap is;
+- `latest`: `SEQ SLOTS`;
+- `h.jsonl`: one line a frame, appended and flushed whole, moved to
+  `h.jsonl.1` after 65536 lines. it carries the header's fields plus the
+  geometry: `scale` (camera px per frame px, by area), `scale_x`,
+  `scale_y`, `rotation_deg`, `skew_deg`, `keystone_h_pct` (right edge
+  over left, less 1), `keystone_v_pct` (bottom over top), `view_deg`
+  (screen normal against the line of sight, from a pinhole of 1360 px at
+  1920 wide), `fids`, the corner fit `rms_px` and `max_px`, the decoded
+  `N`, `A` and `M`, and `rows`, the camera row of each mark's centre
+  (`N`, `A`, `M`, `top`, `key`, `mid`, `bottom`, `ruler`) for the rolling
+  shutter.
+
+a slot is a 192 byte little-endian header, then per tile a 32 byte tile
+header and its grey bytes, row major:
+
+| offset | type | field |
+| --- | --- | --- |
+| 0 | 8 bytes | magic `TMQARCT1` |
+| 8 | u64 | seq |
+| 16 | u64 | the capture's frame seq |
+| 24 | i64 | the source frame's kernel timestamp, ns, CLOCK_MONOTONIC |
+| 32 | i64 | written, ns, CLOCK_MONOTONIC |
+| 40 | u32 | camera width |
+| 44 | u32 | camera height |
+| 48 | f32 | tile pixels a frame pixel |
+| 52 | u32 | tile count |
+| 56 | 9 x f64 | H, frame px to undistorted camera px, row major, H[8] = 1 |
+| 128 | 5 x f64 | k1, k2, lens centre x, y, norm (camera px for r = 1) |
+| 168 | f32 | corner fit rms, camera px |
+| 172 | u32 | flags: 1 corners tracked this frame (else just searched), 2 lens fitted |
+| 176 | u32 | bit i set when fiducial i was used |
+| 180 | 12 bytes | zero |
+
+| tile offset | type | field |
+| --- | --- | --- |
+| 0 | 8 bytes | name, nul padded |
+| 8 | 4 x f32 | frame rectangle x0, y0, x1, y1 |
+| 24 | u32 | width, px |
+| 28 | u32 | height, px |
+
+a frame point (x, y) was recorded at camera pixel c + (p - c)(1 + k1 r^2
++ k2 r^4), p = H (x, y, 1) divided through, c the lens centre and r =
+|p - c| / norm. a tile pixel (i, j) covers frame x0 + i / scale to
+x0 + (i + 1) / scale. outside the camera picture a tile reads 0.
+
+in aim mode the checkbox, or R, shows both rectified screens side by
+side in place of the camera picture, a quarter-scale warp 4 times a
+second, with the table's stamp block, markers and toggles outlined, the
+decoded N, A and M, the decode share over the last 30 frames, the corner
+fit error and the geometry. the panel shows the same numbers, the lens
+terms and the thread's cpu time a frame.
