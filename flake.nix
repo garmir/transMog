@@ -48,7 +48,43 @@
 
       formatter.${system} = pkgs.nixfmt-tree;
 
-      checks.${system}.transmog = self.packages.${system}.transmog;
+      # nix flake check is the whole of CI, so these run the same on a
+      # laptop and in the workflow. Each one reuses the package's vendored
+      # crates and build inputs and swaps its build for one cargo command
+      checks.${system} =
+        let
+          transmog = self.packages.${system}.transmog;
+          cargoCheck =
+            name: tools: command:
+            transmog.overrideAttrs (old: {
+              pname = "transmog-${name}";
+              nativeBuildInputs = old.nativeBuildInputs ++ tools;
+              buildPhase = ''
+                runHook preBuild
+                ${command}
+                runHook postBuild
+              '';
+              doCheck = false;
+              installPhase = "touch $out";
+              postInstall = "";
+              postFixup = "";
+              desktopItems = [ ];
+              dontFixup = true;
+            });
+        in
+        {
+          inherit transmog;
+          fmt = cargoCheck "fmt" [ pkgs.rustfmt ] "cargo fmt --check";
+          clippy = cargoCheck "clippy" [
+            pkgs.clippy
+          ] "cargo clippy --offline --all-targets -- -D warnings";
+          # the package build runs the tests too, but in release; this runs
+          # them in the dev profile, with debug assertions and overflow
+          # checks on. The sandbox has no wgpu adapter, so the kittest tests
+          # take their no-renderer branch, and the camera and gpu tests stay
+          # #[ignore]d
+          test = cargoCheck "test" [ ] "cargo test --offline --frozen";
+        };
 
       devShells.${system}.default = pkgs.mkShell {
         packages = with pkgs; [

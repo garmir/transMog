@@ -1,0 +1,19 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: cachix/install-nix-action@v31.11.3
+      - uses: DeterminateSystems/magic-nix-cache-action@v15
+      # the same command runs locally; flake.nix holds every check
+      - run: nix flake check -L
