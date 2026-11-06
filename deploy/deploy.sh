@@ -29,12 +29,14 @@ EOF
 
 stamp() { date '+%F %T.%3N'; }
 
+# never fails: a rollback has to go on when the terminal is gone or the
+# log's filesystem went read-only
 log() {
 	local line
 	line="$(stamp) $*"
-	printf '%s\n' "$line" >&2
+	{ printf '%s\n' "$line" >&2; } 2>/dev/null || true
 	if [[ -n ${DEPLOY_LOG:-} ]]; then
-		printf '%s\n' "$line" >>"$DEPLOY_LOG"
+		{ printf '%s\n' "$line" >>"$DEPLOY_LOG"; } 2>/dev/null || true
 	fi
 }
 
@@ -269,7 +271,7 @@ start_unit() {
 	local bin=$1 props=() p
 	for p in "${RUN_PROPS[@]}"; do props+=(-p "$p"); done
 	SWAP_MARK=$STATE_DIR/started
-	touch "$SWAP_MARK"
+	touch "$SWAP_MARK" 2>/dev/null || log "could not touch $SWAP_MARK"
 	run systemd-run --user --unit "$UNIT" "${props[@]}" "$bin" "${SPEC_ARGV[@]}" ||
 		return 1
 	unit_status
@@ -449,10 +451,14 @@ swap_to() {
 # ---------------------------------------------------------------- links
 
 set_link() {
-	local name=$1 target=$2
-	ln -sfn "$target" "$BIN_DIR/.$name.tmp"
-	mv -Tf "$BIN_DIR/.$name.tmp" "$BIN_DIR/$name"
-	log "$BIN_DIR/$name -> $target"
+	local name=$1 target=$2 err
+	if err=$({ ln -sfn "$target" "$BIN_DIR/.$name.tmp" &&
+		mv -Tf "$BIN_DIR/.$name.tmp" "$BIN_DIR/$name"; } 2>&1); then
+		log "$BIN_DIR/$name -> $target"
+		return 0
+	fi
+	log "could not point $BIN_DIR/$name at $target: $err"
+	return 1
 }
 
 # ---------------------------------------------------------------- deploy
@@ -481,8 +487,8 @@ deploy_bin() {
 	[[ -x $prev ]] || refuse "no previous build to fall back to: $prev"
 
 	summary "deploying $name on $UNIT, fallback $(basename "$prev")"
-	set_link previous "$prev"
-	set_link current "$bin"
+	set_link previous "$prev" || refuse "could not link $BIN_DIR/previous"
+	set_link current "$bin" || refuse "could not link $BIN_DIR/current"
 	if swap_to "$bin"; then
 		save_spec_for "$bin"
 		summary "deployed $name on $UNIT, pid $SWAP_PID: gates passed"
@@ -492,12 +498,25 @@ deploy_bin() {
 	local why
 	why=$(printf '%s; ' "${GATE_NOTES[@]}")
 	summary "$name failed: ${why%; }; rolling back to $(basename "$prev")"
-	set_link failed "$bin"
-	set_link current "$prev"
+	roll_back "$bin" "$prev"
+}
+
+# puts PREV back after BIN failed; returns 1 when PREV passes its gates
+# and the links are right, else 2. every step runs whatever the one
+# before it did, since the unit has to come back even when BIN_DIR or the
+# log cannot be written
+roll_back() {
+	local bin=$1 prev=$2 links=ok why
+	set_link failed "$bin" || links=broken
+	set_link current "$prev" || links=broken
 	if swap_to "$prev"; then
 		save_spec_for "$prev"
-		summary "rolled back $UNIT to $(basename "$prev"), pid $SWAP_PID"
-		return 1
+		if [[ $links == ok ]]; then
+			summary "rolled back $UNIT to $(basename "$prev"), pid $SWAP_PID"
+			return 1
+		fi
+		summary "$UNIT is back on $(basename "$prev"), pid $SWAP_PID, but the links in $BIN_DIR could not be fixed"
+		return 2
 	fi
 	why=$(printf '%s; ' "${GATE_NOTES[@]}")
 	summary "rollback to $(basename "$prev") failed too: ${why%; }"
@@ -506,7 +525,7 @@ deploy_bin() {
 
 save_spec_for() {
 	SPEC_BIN=$1
-	save_spec
+	{ save_spec; } 2>/dev/null || log "could not save the unit's arguments in $STATE_DIR"
 }
 
 WORKTREE_PARENT=
@@ -597,10 +616,10 @@ main() {
 	log "built $out, gc root $root"
 
 	local bin=$BIN_DIR/transmog-$short
-	set_link "transmog-$short" "$out/bin/transmog"
+	set_link "transmog-$short" "$out/bin/transmog" || refuse "could not link $bin"
 
 	if [[ $dry == yes ]]; then
-		set_link staged "$bin"
+		set_link staged "$bin" || refuse "could not link $BIN_DIR/staged"
 		read_spec
 		print_plan "$bin"
 		summary "staged $(basename "$bin") for $UNIT (dry run)"

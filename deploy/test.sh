@@ -99,6 +99,14 @@ done
 	printf 'LOG_HOOK=%q\n' "printf '%s\\n' \"\$1\" >>$tmp/hook.log"
 } >"$tmp/deploy.env"
 
+# the bad build's health check takes away write access to BIN_DIR and the
+# log, the way a filesystem gone read-only would, before it fails
+{
+	printf 'source %q\n' "$tmp/deploy.env"
+	printf 'HEALTH_CMDS=(%q)\n' \
+		"case \$DEPLOY_BIN in */transmog-good0) chmod a-w $tmp/bin $tmp/deploy.log; exit 1 ;; esac"
+} >"$tmp/readonly.env"
+
 qa_before=$(systemctl --user show -P MainPID transmog-qa.service 2>/dev/null || true)
 
 systemd-run --user --quiet --unit "$UNIT" -p WorkingDirectory="$tmp" \
@@ -126,9 +134,10 @@ running() {
 
 points() { [[ $(readlink "$tmp/bin/$1") == "$tmp/bin/transmog-$2" ]]; }
 
+# deploy BUILD [ENV]: deploy.sh's deploy_bin on BUILD, settings from ENV
 deploy() {
 	local rc=0
-	DEPLOY_ENV=$tmp/deploy.env bash -c 'source "$1"; load_env; deploy_bin "$2"' \
+	DEPLOY_ENV=$tmp/${2:-deploy}.env bash -c 'source "$1"; load_env; deploy_bin "$2"' \
 		deploy "$here/deploy.sh" "$tmp/bin/transmog-$1" 2>>"$tmp/stderr.log" || rc=$?
 	echo "$rc"
 }
@@ -153,6 +162,14 @@ check "fps gate named in the log" grep -q 'gate failed: tap: 2[0-9.]* fps, below
 check "port gate named in the log" grep -q "gate failed: port $p2: listener none" "$tmp/deploy.log"
 check "process gate named in the log" grep -q 'gate failed: process: ' "$tmp/deploy.log"
 check "log hook saw three rollbacks" [ "$(grep -c '^rolled back' "$tmp/hook.log")" = 3 ]
+echo "rollback with BIN_DIR and the log read-only"
+rc=$(deploy good0 readonly)
+chmod u+w "$tmp/bin" "$tmp/deploy.log"
+check "exit 2" [ "$rc" = 2 ]
+check "unit runs good1 again" running good1
+check "current left on good0" points current good0
+check "summary says the links are wrong" grep -q 'links in .* could not be fixed' "$tmp/hook.log"
+
 qa_after=$(systemctl --user show -P MainPID transmog-qa.service 2>/dev/null || true)
 check "transmog-qa untouched" [ "$qa_before" = "$qa_after" ]
 
