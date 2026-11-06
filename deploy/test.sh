@@ -161,7 +161,26 @@ done
 check "fps gate named in the log" grep -q 'gate failed: tap: 2[0-9.]* fps, below 29' "$tmp/deploy.log"
 check "port gate named in the log" grep -q "gate failed: port $p2: listener none" "$tmp/deploy.log"
 check "process gate named in the log" grep -q 'gate failed: process: ' "$tmp/deploy.log"
-check "log hook saw three rollbacks" [ "$(grep -c '^rolled back' "$tmp/hook.log")" = 3 ]
+
+echo "SIGTERM during the gates rolls back"
+starts=$(grep -c "started on $tmp/bin/transmog-good0" "$tmp/deploy.log" || true)
+DEPLOY_ENV=$tmp/deploy.env bash -c 'source "$1"; load_env; deploy_bin "$2"' \
+	deploy "$here/deploy.sh" "$tmp/bin/transmog-good0" 2>>"$tmp/stderr.log" &
+pid=$!
+for _ in $(seq 100); do
+	(($(grep -c "started on $tmp/bin/transmog-good0" "$tmp/deploy.log" || true) > starts)) && break
+	sleep 0.1
+done
+kill -TERM "$pid"
+rc=0
+wait "$pid" || rc=$?
+check "exit 1" [ "$rc" = 1 ]
+check "current -> good1" points current good1
+check "failed -> good0" points failed good0
+check "unit runs good1 again" running good1
+check "signal named in the log" grep -q 'SIGTERM during the swap to transmog-good0' "$tmp/deploy.log"
+check "log hook saw four rollbacks" [ "$(grep -c '^rolled back' "$tmp/hook.log")" = 4 ]
+
 echo "rollback with BIN_DIR and the log read-only"
 rc=$(deploy good0 readonly)
 chmod u+w "$tmp/bin" "$tmp/deploy.log"

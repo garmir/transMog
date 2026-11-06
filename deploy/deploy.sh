@@ -463,10 +463,43 @@ set_link() {
 
 # ---------------------------------------------------------------- deploy
 
+# where deploy_bin is, for the signal traps: before (nothing touched),
+# forward (the unit is being moved onto the new build), rollback, finished
+SWAP_PHASE=before
+SWAP_BIN=
+SWAP_PREV=
+
+# Ctrl-C, a dropped ssh session or a kill must not leave the unit stopped
+# or on an ungated build. bash runs the trap once the running command
+# returns, so a signal during the forward swap rolls back from there; one
+# during the rollback is logged and the rollback goes on
+on_signal() {
+	case $SWAP_PHASE in
+	before)
+		summary "deploy stopped by SIG$1 before $UNIT was touched"
+		exit 3
+		;;
+	forward)
+		SWAP_PHASE=rollback
+		summary "SIG$1 during the swap to $(basename "$SWAP_BIN"); rolling back to $(basename "$SWAP_PREV")"
+		local rc=0
+		roll_back "$SWAP_BIN" "$SWAP_PREV" || rc=$?
+		exit "$rc"
+		;;
+	*) log "SIG$1 during the $SWAP_PHASE stage; carrying on" ;;
+	esac
+}
+
 # the part after the build: BIN is BIN_DIR/transmog-<sha>, already there
 deploy_bin() {
 	local bin=$1 name
 	name=$(basename "$bin")
+	trap 'on_signal INT' INT
+	trap 'on_signal TERM' TERM
+	trap 'on_signal HUP' HUP
+	# with the terminal gone a write to it must fail, which log ignores,
+	# rather than kill the script
+	trap '' PIPE
 
 	if [[ -n $PAUSE_FILE && -e $PAUSE_FILE ]]; then
 		log "waiting for $PAUSE_FILE to go, up to ${PAUSE_TIMEOUT}s"
@@ -489,7 +522,9 @@ deploy_bin() {
 	summary "deploying $name on $UNIT, fallback $(basename "$prev")"
 	set_link previous "$prev" || refuse "could not link $BIN_DIR/previous"
 	set_link current "$bin" || refuse "could not link $BIN_DIR/current"
+	SWAP_BIN=$bin SWAP_PREV=$prev SWAP_PHASE=forward
 	if swap_to "$bin"; then
+		SWAP_PHASE=finished
 		save_spec_for "$bin"
 		summary "deployed $name on $UNIT, pid $SWAP_PID: gates passed"
 		return 0
@@ -497,6 +532,7 @@ deploy_bin() {
 
 	local why
 	why=$(printf '%s; ' "${GATE_NOTES[@]}")
+	SWAP_PHASE=rollback
 	summary "$name failed: ${why%; }; rolling back to $(basename "$prev")"
 	roll_back "$bin" "$prev"
 }
@@ -510,6 +546,7 @@ roll_back() {
 	set_link failed "$bin" || links=broken
 	set_link current "$prev" || links=broken
 	if swap_to "$prev"; then
+		SWAP_PHASE=finished
 		save_spec_for "$prev"
 		if [[ $links == ok ]]; then
 			summary "rolled back $UNIT to $(basename "$prev"), pid $SWAP_PID"

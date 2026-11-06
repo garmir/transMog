@@ -386,7 +386,9 @@ build goes through the same gates, and deploy exits 1 (2 if that fails as
 well, 3 for a refusal). these are the failures of the 2026-11-05 qa night:
 ndi on 5962, the tap at 19 to 25 fps, and a process dead after a usb drop
 with nothing restarting it. `UNIT_PROPS=(Restart=on-failure RestartSec=2)`
-covers the last one from then on.
+covers the last one from then on. an INT, TERM or HUP once the swap has
+begun rolls back the same way; one during the rollback is logged and the
+rollback finishes.
 
 `--dry-run` resolves the commit, checks ci, builds, links the binary as
 `BIN_DIR/staged` and prints the plan, without stopping or starting
