@@ -82,7 +82,7 @@ after 5 s without a change.
 picture as it leaves the last gpu pass, so with the lens on a receiver gets
 the bent view, as each camera frame arrives (`clock_video` off). the source
 is called `transMog`; receivers list it with the host in front,
-`ROTMACHINE (transMog)` on rotmachine.
+`MYHOST (transMog)` on a machine named myhost.
 
 it goes out at 640x360 unless `--ndi-size WxH` or the live key `ndi_size`
 says otherwise; the width must be even. 1080p uyvy comes to about 125 Mb/s
@@ -121,9 +121,9 @@ nixpkgs has; when the download stops matching, the new hash goes in
 transMog reads `key value` lines from `<tap dir>/control`, or from the
 file `gui --control-file PATH` names, checking its mtime every 100 ms the
 way it checks the overlay. `gui --control ws://HOST:PORT/PATH` also
-subscribes to a websocket, TouchDesigner's `/viz_ctrl/ws` on ki1be, and
-takes the object at `assets.camera.transmog` from each json message as the
-same pairs. both can run at once.
+subscribes to a websocket, TouchDesigner's `/viz_ctrl/ws` on the render
+host, and takes the object at `assets.camera.transmog` from each json
+message as the same pairs. both can run at once.
 
 - a v4l2 control by its v4l2-ctl name: `brightness 128`,
   `focus_automatic_continuous 0`, `power_line_frequency 1`. values are
@@ -152,8 +152,8 @@ content moves, by a change from either source or from the window:
     t 1793921606.898878
     qa_lock 1
     ndi on
-    file /run/user/1000/transmog/tap/control
-    ws ws://192.168.1.242:9980/viz_ctrl/ws connected
+    file /run/user/UID/transmog/tap/control
+    ws ws://HOST:PORT/viz_ctrl/ws connected
     set fisheye_k1 0.3 0.3 ok ws:7644
     set gain 200 159 locked file
     cam zoom_absolute 100
