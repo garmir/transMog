@@ -212,6 +212,23 @@ impl App {
                     }
                     None => error(&value, "ndi wants on or off", source),
                 },
+                "ndi_size" => match crate::ndi::parse_size(&value) {
+                    Ok(size) => {
+                        self.set_ndi_size(size);
+                        let got = self.ndi_size().map(|(w, h)| format!("{w}x{h}"));
+                        Report {
+                            status: if got.as_deref() == Some(&format!("{}x{}", size.0, size.1)) {
+                                Status::Ok
+                            } else {
+                                Status::Error(self.status.clone())
+                            },
+                            wanted: value.clone(),
+                            got,
+                            source,
+                        }
+                    }
+                    Err(e) => error(&value, &e, source),
+                },
                 "preset" => Report {
                     wanted: value.clone(),
                     got: Some(value.clone()),

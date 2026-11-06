@@ -23,6 +23,8 @@ pub(crate) struct Preview {
     /// the uploaded frame's tap seq and timestamp, until NDI out sends it
     unsent: Option<FrameMeta>,
     ndi: Option<ndi::Output>,
+    /// kept here so NDI out comes back at it after being turned off
+    ndi_size: (u32, u32),
 }
 
 impl Preview {
@@ -36,6 +38,7 @@ impl Preview {
             dirty: false,
             unsent: None,
             ndi: None,
+            ndi_size: ndi::DEFAULT_SIZE,
         }
     }
 
@@ -46,9 +49,22 @@ impl Preview {
             return Ok(());
         }
         if self.ndi.is_none() {
-            self.ndi = Some(ndi::Output::new(&rs.device, self.renderer.input_layout())?);
+            let mut out = ndi::Output::new(&rs.device, self.renderer.input_layout())?;
+            out.set_size(self.ndi_size);
+            self.ndi = Some(out);
         }
         Ok(())
+    }
+
+    pub fn set_ndi_size(&mut self, size: (u32, u32)) {
+        self.ndi_size = size;
+        if let Some(out) = &mut self.ndi {
+            out.set_size(size);
+        }
+    }
+
+    pub fn ndi_size(&self) -> (u32, u32) {
+        self.ndi_size
     }
 
     pub fn ndi(&self) -> Option<&ndi::Output> {

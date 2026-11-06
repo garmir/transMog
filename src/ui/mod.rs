@@ -291,6 +291,18 @@ impl App {
         }
     }
 
+    /// the size NDI out sends at, now and after it is next turned on
+    pub fn set_ndi_size(&mut self, size: (u32, u32)) {
+        match &mut self.preview {
+            Some(preview) => preview.set_ndi_size(size),
+            None => self.status = "ndi: no renderer".into(),
+        }
+    }
+
+    pub fn ndi_size(&self) -> Option<(u32, u32)> {
+        self.preview.as_ref().map(preview::Preview::ndi_size)
+    }
+
     pub fn ndi_stats(&self) -> Option<crate::ndi::Stats> {
         self.preview.as_ref()?.ndi().map(crate::ndi::Output::stats)
     }

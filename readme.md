@@ -79,13 +79,19 @@ after 5 s without a change.
 
 `transmog gui --ndi`, or the "NDI out" checkbox under "ndi", sends the
 picture as it leaves the last gpu pass, so with the lens on a receiver gets
-the bent view, at the capture size and as each camera frame arrives
-(`clock_video` off). the source is called `transMog`; receivers list it with
-the host in front, `ROTMACHINE (transMog)` on rotmachine.
+the bent view, as each camera frame arrives (`clock_video` off). the source
+is called `transMog`; receivers list it with the host in front,
+`ROTMACHINE (transMog)` on rotmachine.
 
-a pass packs the frame to uyvy (bt.709 limited range) on the gpu, a ring of
-3 buffers reads it back, and a thread of its own maps them and hands them to
-the sdk's async send. the ui thread never waits: when all three buffers are
+it goes out at 640x360 unless `--ndi-size WxH` or the live key `ndi_size`
+says otherwise; the width must be even. 1080p uyvy comes to about 125 Mb/s
+of SpeedHQ, and the ssh tunnel to TouchDesigner over Wi-Fi carried 1.6 fps
+of it. a sent pixel is the mean of up to 4 x 4 source texels over its
+footprint, a different aspect is stretched, not cropped.
+
+a pass scales and packs the frame to uyvy (bt.709 limited range) on the
+gpu, a ring of 3 buffers reads it back, and a thread of its own maps them
+and hands them to the sdk's async send. the ui thread never waits: when all three buffers are
 still in flight the frame is skipped and counted. the panel shows frames
 sent, skipped and failed, the receiver count, and the mean time from submit
 to mapped and of the send call.
@@ -93,9 +99,12 @@ to mapped and of the send call.
 every frame carries `<tm seq="N" ts="NS"/>` as its ndi metadata: the tap's
 seq and the v4l2 kernel timestamp (ns, CLOCK_MONOTONIC) of the buffer it was
 made from. with the tap off, seq is the capture's own frame count. the same
-seq & 0xffff is burned into the top 32 rows after every pass, for paths that
-drop metadata: 16 cells of width / 16 px, most significant bit on the left,
-Y 235 for 1 and Y 16 for 0, the scheme of the visualiser's stamp rows.
+seq & 0xffff is burned into the top rows after every pass, for paths that
+drop metadata: 16 cells of width / 16 px over the top 32/1080 of the height,
+rounded up (32 rows at 1080, 16 at 540, 11 at 360), most significant bit on
+the left, Y 235 for 1 and Y 16 for 0, the scheme of the visualiser's stamp
+rows. a receiver that takes the top 32/1080 of any size as the band reads
+no picture rows.
 `src/ndi/stamp.rs` has the encoder and a decoder that averages the middle
 of each cell.
 
@@ -125,7 +134,7 @@ same pairs. both can run at once.
   `fisheye_zoom`, `fisheye_k1`, `fisheye_yaw`, `fisheye_pitch`,
   `fisheye_roll`, `fisheye_edge`, `fisheye_centre_x`, `fisheye_centre_y`.
   angles are in degrees and clamped as the sliders clamp them.
-- `preset NAME`, `ndi on|off` and `qa_lock 0|1`.
+- `preset NAME`, `ndi on|off`, `ndi_size WxH` and `qa_lock 0|1`.
 
 a pair is applied only when its value differs from the last one the same
 source sent. viz_ctrl repeats its whole state about 56 times a second, so

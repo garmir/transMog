@@ -1,5 +1,5 @@
-//! NDI out: the effected frame, packed to uyvy on the gpu with the stamp
-//! band burned into its top rows, read back through a ring of mapped
+//! NDI out: the effected frame, scaled to the send size and packed to
+//! uyvy on the gpu with the stamp band burned into its top rows, read back through a ring of mapped
 //! buffers and sent by a thread of its own, so neither the readback nor
 //! the SDK ever waits on the ui thread.
 
@@ -28,15 +28,45 @@ pub const SOURCE_NAME: &str = "transMog";
 /// frame is skipped
 const SLOTS: usize = 3;
 const MAP_TIMEOUT: Duration = Duration::from_secs(1);
+/// a 1080p uyvy stream is about 125 Mb/s of SpeedHQ, more than the ssh
+/// tunnel to TD carries over Wi-Fi (1.6 fps), and TD's cam_raster scales
+/// to 960x540 anyway
+pub const DEFAULT_SIZE: (u32, u32) = (640, 360);
+const MAX_SIZE: (u32, u32) = (3840, 2160);
+
+/// `WxH` with an even width (uyvy pairs pixels), wide enough for the
+/// stamp decoder's 4 px a cell and tall enough for a 4 row band
+pub fn parse_size(text: &str) -> Result<(u32, u32), String> {
+    let (w, h) = text
+        .split_once(['x', 'X'])
+        .ok_or_else(|| format!("{text}: wants WxH"))?;
+    let (w, h): (u32, u32) = match (w.trim().parse(), h.trim().parse()) {
+        (Ok(w), Ok(h)) => (w, h),
+        _ => return Err(format!("{text}: wants WxH in whole pixels")),
+    };
+    if w % 2 != 0 {
+        return Err(format!("{text}: the width must be even"));
+    }
+    if w < stamp::CELLS * 4 || stamp::band_height(h) < 4 {
+        return Err(format!("{text}: too small for the stamp band"));
+    }
+    if w > MAX_SIZE.0 || h > MAX_SIZE.1 {
+        return Err(format!("{text}: above {}x{}", MAX_SIZE.0, MAX_SIZE.1));
+    }
+    Ok((w, h))
+}
 
 /// mirrors `Params` in pack.wgsl
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Pod, Zeroable)]
 struct Params {
     width: u32,
+    height: u32,
     band: u32,
     value: u32,
-    _pad: u32,
+    src_width: u32,
+    src_height: u32,
+    _pad: [u32; 2],
 }
 
 /// what the panel shows; times are means over the last report window
@@ -98,6 +128,7 @@ pub struct Output {
     sampler: wgpu::Sampler,
     input_layout: wgpu::BindGroupLayout,
     packed: Option<Packed>,
+    size: (u32, u32),
     fps: u32,
     jobs: Option<Sender<Job>>,
     thread: Option<JoinHandle<()>>,
@@ -174,6 +205,7 @@ impl Output {
             sampler,
             input_layout: input_layout.clone(),
             packed: None,
+            size: DEFAULT_SIZE,
             fps: 30,
             jobs: Some(jobs),
             thread: Some(thread),
@@ -184,6 +216,15 @@ impl Output {
 
     pub fn set_fps(&mut self, fps: u32) {
         self.fps = fps.max(1);
+    }
+
+    /// the sent frame's size; the next frame goes out at it
+    pub fn set_size(&mut self, size: (u32, u32)) {
+        self.size = size;
+    }
+
+    pub fn size(&self) -> (u32, u32) {
+        self.size
     }
 
     pub fn stats(&self) -> Stats {
@@ -200,11 +241,11 @@ impl Output {
         queue: &wgpu::Queue,
         encoder: &mut wgpu::CommandEncoder,
         input: &wgpu::TextureView,
-        size: (u32, u32),
+        src_size: (u32, u32),
         meta: &FrameMeta,
     ) -> Option<Pending> {
-        let (width, height) = size;
-        if width < 2 || height < stamp::BAND_HEIGHT {
+        let (width, height) = self.size;
+        if src_size.0 == 0 || src_size.1 == 0 {
             return None;
         }
         if self
@@ -233,9 +274,12 @@ impl Output {
             0,
             bytemuck::bytes_of(&Params {
                 width,
-                band: stamp::BAND_HEIGHT,
+                height,
+                band: stamp::band_height(height),
                 value: u32::from(stamp::value(seq)),
-                _pad: 0,
+                src_width: src_size.0,
+                src_height: src_size.1,
+                _pad: [0; 2],
             }),
         );
         let group = &packed.input.as_ref().expect("set above").1;
@@ -315,8 +359,9 @@ impl Drop for Output {
     }
 }
 
-/// uyvy is 2 bytes a pixel; 1920 and 1280 wide rows are already a
-/// multiple of the 256 byte copy alignment, so NDI gets them unpadded
+/// uyvy is 2 bytes a pixel; 1920, 1280 and 640 wide rows are already a
+/// multiple of the 256 byte copy alignment, so NDI gets them unpadded. a
+/// 960 row is padded to 2048 bytes and sent with that line stride
 fn stride(width: u32) -> u32 {
     (width / 2 * 4).div_ceil(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT)
         * wgpu::COPY_BYTES_PER_ROW_ALIGNMENT
@@ -504,9 +549,38 @@ mod tests {
     }
 
     #[test]
+    fn pack_shader_validates() {
+        use wgpu::naga;
+        let source = format!(
+            "{}\n{}",
+            fullscreen_vertex_source(),
+            include_str!("pack.wgsl")
+        );
+        let module = naga::front::wgsl::parse_str(&source).expect("pack.wgsl parses");
+        naga::valid::Validator::new(
+            naga::valid::ValidationFlags::all(),
+            naga::valid::Capabilities::empty(),
+        )
+        .validate(&module)
+        .expect("pack.wgsl validates");
+    }
+
+    #[test]
+    fn sizes_parse_as_w_by_h() {
+        assert_eq!(parse_size("640x360"), Ok((640, 360)));
+        assert_eq!(parse_size("960X540"), Ok((960, 540)));
+        assert!(parse_size("641x360").is_err());
+        assert!(parse_size("640").is_err());
+        assert!(parse_size("32x360").is_err());
+        assert!(parse_size("640x100").is_err());
+        assert!(parse_size("7680x4320").is_err());
+    }
+
+    #[test]
     fn hd_rows_need_no_padding() {
         assert_eq!(stride(1920), 3840);
         assert_eq!(stride(1280), 2560);
+        assert_eq!(stride(960), 2048);
         assert_eq!(stride(640), 1280);
         assert_eq!(stride(1000), 2048);
     }

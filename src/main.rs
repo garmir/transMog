@@ -29,6 +29,10 @@ enum Command {
         /// send the effected view as the NDI source `HOST (transMog)`
         #[arg(long)]
         ndi: bool,
+        /// the size NDI out sends at, scaled on the gpu from the effected
+        /// view; also the live control key `ndi_size`
+        #[arg(long, value_name = "WxH", default_value = "640x360", value_parser = transmog::ndi::parse_size)]
+        ndi_size: (u32, u32),
         /// read live `key value` lines from PATH instead of
         /// `<tap dir>/control`
         #[arg(long, value_name = "PATH")]
@@ -76,6 +80,7 @@ fn main() -> Result<()> {
         tap: None,
         preset: None,
         ndi: false,
+        ndi_size: transmog::ndi::DEFAULT_SIZE,
         control_file: None,
         control: None,
     }) {
@@ -83,12 +88,14 @@ fn main() -> Result<()> {
             tap,
             preset,
             ndi,
+            ndi_size,
             control_file,
             control,
         } => run_gui(
             tap.map(|dir| dir.unwrap_or_else(capture::tap::default_dir)),
             preset,
             ndi,
+            ndi_size,
             control_file,
             control,
         ),
@@ -100,6 +107,7 @@ fn run_gui(
     tap: Option<PathBuf>,
     preset: Option<String>,
     ndi: bool,
+    ndi_size: (u32, u32),
     control_file: Option<PathBuf>,
     control: Option<String>,
 ) -> Result<()> {
@@ -122,6 +130,7 @@ fn run_gui(
             if let Some(name) = preset {
                 app.apply_preset(&name);
             }
+            app.set_ndi_size(ndi_size);
             if ndi {
                 app.set_ndi(true);
             }
