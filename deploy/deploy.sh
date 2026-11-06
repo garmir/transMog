@@ -88,6 +88,8 @@ load_env() {
 	: "${NDI_PORTS=5960 5961}"
 	: "${HEALTH_CMD_TIMEOUT:=30}"
 	: "${TAP_DIR:=}"
+	: "${NIX_FLAGS:=}"
+	read -ra NIX_ARGS <<<"$NIX_FLAGS"
 	[[ -v HEALTH_CMDS ]] || HEALTH_CMDS=()
 	[[ -v UNIT_PROPS ]] || UNIT_PROPS=()
 	[[ -v RESTART_UNITS ]] || RESTART_UNITS=()
@@ -572,7 +574,7 @@ main() {
 		refuse "could not check out $short"
 
 	if [[ $local_ci == yes ]]; then
-		run nix flake check "$wt" || refuse "nix flake check failed at $short"
+		run nix flake check "${NIX_ARGS[@]}" "$wt" || refuse "nix flake check failed at $short"
 		log "ci: nix flake check passed at $short"
 	else
 		local runs
@@ -589,7 +591,7 @@ main() {
 
 	mkdir -p "$STATE_DIR/gcroots"
 	local root=$STATE_DIR/gcroots/transmog-$short out
-	run nix build "$wt#transmog" --out-link "$root" || refuse "nix build failed at $short"
+	run nix build "${NIX_ARGS[@]}" "$wt#transmog" --out-link "$root" || refuse "nix build failed at $short"
 	out=$(readlink -f "$root")
 	[[ -x $out/bin/transmog ]] || refuse "$out has no bin/transmog"
 	log "built $out, gc root $root"

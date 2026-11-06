@@ -354,7 +354,9 @@ on `origin/integration`, or whose github runs on integration have not all
 passed; `--local-ci` runs `nix flake check` at the commit in a temporary
 worktree instead. it then runs `nix build .#transmog` there with a gc
 rooted out-link and links the binary as `BIN_DIR/transmog-<sha>`, with
-`current` and `previous` beside it.
+`current` and `previous` beside it. both nix commands take `NIX_FLAGS`
+from the settings; the example's `--max-jobs 0` keeps the build off the
+deploying machine and on its remote builders.
 
 the unit is one `systemd-run` made, so it disappears when it stops. deploy
 reads its arguments and properties (environment, working directory,
