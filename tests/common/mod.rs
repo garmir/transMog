@@ -63,6 +63,11 @@ pub fn snapshot_dir() -> PathBuf {
 /// "no renderer" otherwise
 pub fn harness_no_camera() -> AppHarness {
     let render_state = render_state();
+    // without this the renderer tests return early and cargo counts them
+    // as passed, which is how checks.test once went green on none of them
+    if render_state.is_none() && std::env::var_os("TRANSMOG_REQUIRE_RENDERER").is_some() {
+        panic!("TRANSMOG_REQUIRE_RENDERER is set but no wgpu adapter was found");
+    }
     // the combo boxes and the centre drag values have no accessible
     // name, which the default check treats as a failure
     let mut builder = Harness::builder()

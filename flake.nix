@@ -80,10 +80,16 @@
           ] "cargo clippy --offline --all-targets -- -D warnings";
           # the package build runs the tests too, but in release; this runs
           # them in the dev profile, with debug assertions and overflow
-          # checks on. The sandbox has no wgpu adapter, so the kittest tests
-          # take their no-renderer branch, and the camera and gpu tests stay
-          # #[ignore]d
-          test = cargoCheck "test" [ ] "cargo test --offline --frozen";
+          # checks on. The sandbox has no gpu, so mesa's lavapipe is the
+          # only vulkan driver here, and TRANSMOG_REQUIRE_RENDERER makes the
+          # kittest tests fail instead of passing without one. The camera
+          # and gpu tests stay #[ignore]d
+          test = cargoCheck "test" [ ] ''
+            export VK_ICD_FILENAMES=${pkgs.mesa}/share/vulkan/icd.d/lvp_icd.x86_64.json
+            export LD_LIBRARY_PATH=${pkgs.lib.makeLibraryPath [ pkgs.vulkan-loader ]}
+            export TRANSMOG_REQUIRE_RENDERER=1
+            cargo test --offline --frozen
+          '';
         };
 
       devShells.${system}.default = pkgs.mkShell {
