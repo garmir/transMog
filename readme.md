@@ -227,12 +227,21 @@ decode rate. a file already there is kept as `FILE.YYYYMMDD-HHMMSS.bak`.
 
 the panel's zoom, pan and tilt sliders write `zoom_absolute`,
 `pan_absolute` and `tilt_absolute` and read all three back; no other
-control is touched, and nothing goes into a preset, so applying a preset
-puts its own framing back. "fit both" zooms in as far as the margin
-allows, centres the screens with pan and tilt, learning how far a step
-moves the picture from its first one, and zooms in again; "reset
-framing" goes back to 100, 0, 0. the fit has only run against a model of
-the camera in `src/aim/fit.rs`'s test, not on the c920.
+control is touched, and nothing goes into a preset. "fit both" zooms in
+as far as the margin allows, centres the screens with pan and tilt,
+learning how far a step moves the picture from its first one, and zooms
+in again; "reset framing" goes back to 100, 0, 0. the fit has only run
+against a model of the camera in `src/aim/fit.rs`'s test, not on the
+c920.
+
+the qa lock holds those three keys, so framing needs `qa_lock 0` or the
+checkbox under "live control". while the lock is on the sliders, "fit
+both" and "reset framing" are greyed out, a write from any of them is
+skipped and counted in the panel, and a fit that is running stops when
+the lock comes on. with the lock off a preset applies its own framing;
+with it on the framing stays at the qa preset's values. a calibration
+saved after framing with the lock off goes stale once the lock is turned
+back on, since that writes the qa framing again.
 
 ## rectified tiles
 

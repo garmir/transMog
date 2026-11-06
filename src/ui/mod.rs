@@ -26,6 +26,8 @@ use crate::rect::{self, Rectify};
 const CONTROL_REFRESH: Duration = Duration::from_secs(1);
 /// how long a framing write gets to land before the fit reads a picture
 const FIT_SETTLE: Duration = Duration::from_millis(500);
+/// a fit under the qa lock would wait on writes that never happen
+const FIT_HELD: &str = "fit needs qa_lock off: zoom, pan and tilt are held";
 
 /// indices into `App::formats` and its nested size and fps lists
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
@@ -382,16 +384,23 @@ impl App {
         Some((ptz, limits))
     }
 
-    /// writes the framing controls that differ, never any other, and
-    /// reads all three back
+    /// which of Ptz::CONTROLS the qa lock holds now
+    fn framing_held(&self) -> [bool; 3] {
+        Ptz::CONTROLS.map(|n| self.held(n))
+    }
+
+    /// writes the framing controls that differ and the qa lock does not
+    /// hold, never any other, and reads all three back
     fn set_framing(&mut self, want: Ptz) {
         let Some((now, _)) = self.framing() else {
             return;
         };
+        let held = self.framing_held();
         let ids: Vec<Option<u32>> = Ptz::CONTROLS
             .iter()
             .map(|n| self.control_id(n).map(|c| c.id))
             .collect();
+        let mut skipped = 0;
         if let Some(controls) = &self.controls {
             for (i, id) in ids.iter().enumerate() {
                 let Some(id) = *id else {
@@ -400,10 +409,17 @@ impl App {
                 if want.get(i) == now.get(i) {
                     continue;
                 }
+                if held[i] {
+                    skipped += 1;
+                    continue;
+                }
                 if let Err(e) = controls.set(id, want.get(i)) {
                     self.status = format!("{}: {e:#}", Ptz::CONTROLS[i]);
                 }
             }
+        }
+        if skipped > 0 {
+            self.aim_ui.fit_status = format!("{skipped} held by the qa lock, not written");
         }
         self.query_controls();
         let got = self.framing().map(|(p, _)| p);
@@ -430,6 +446,9 @@ impl App {
                 let mut want = now;
                 want.set(i, v);
                 self.set_framing(want);
+            }
+            aim_panel::Event::Fit if self.framing_held().contains(&true) => {
+                self.aim_ui.fit_status = FIT_HELD.into();
             }
             aim_panel::Event::Fit => {
                 self.aim_ui.fit = Some(FitRun::default());
@@ -477,6 +496,12 @@ impl App {
             self.aim_ui.fit = None;
             return;
         };
+        // the lock can come on mid-fit, from the window or a control file
+        if self.framing_held().contains(&true) {
+            self.aim_ui.fit = None;
+            self.aim_ui.fit_status = FIT_HELD.into();
+            return;
+        }
         let union = (report.screens.len() == 2)
             .then(|| report.union())
             .flatten();
@@ -774,6 +799,7 @@ impl App {
                                         &self.aim_ui,
                                         aim_report.as_deref(),
                                         framing,
+                                        self.framing_held(),
                                         &self.calibration,
                                         self.rect.as_ref().map(|r| (r, rect_report.as_deref())),
                                     );

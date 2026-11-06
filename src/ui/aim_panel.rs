@@ -30,6 +30,8 @@ pub(crate) struct State {
     pub rectified: bool,
 }
 
+const HELD_HOVER: &str = "held by the qa lock; qa_lock 0 frees it";
+
 const PROJ: Color32 = Color32::from_rgb(255, 150, 40);
 const MINI: Color32 = Color32::from_rgb(70, 200, 255);
 const TARGET: Color32 = Color32::from_rgb(90, 230, 110);
@@ -74,6 +76,7 @@ pub(crate) fn show(
     state: &State,
     report: Option<&Report>,
     framing: Option<(Ptz, Limits)>,
+    held: [bool; 3],
     calibration: &Path,
     rectify: Option<(&rect::Rectify, Option<&rect::Report>)>,
 ) -> Vec<Event> {
@@ -109,6 +112,7 @@ pub(crate) fn show(
     }
     ui.separator();
     ui.label("digital framing (not saved in a preset)");
+    let any_held = held.contains(&true);
     match framing {
         Some((ptz, limits)) => {
             for (i, name) in Ptz::CONTROLS.iter().enumerate() {
@@ -118,7 +122,11 @@ pub(crate) fn show(
                     let slider = egui::Slider::new(&mut v, lo..=hi)
                         .step_by(step.max(1) as f64)
                         .text(*name);
-                    if ui.add(slider).changed() {
+                    if ui
+                        .add_enabled(!held[i], slider)
+                        .on_disabled_hover_text(HELD_HOVER)
+                        .changed()
+                    {
                         events.push(Event::Set(i, v));
                     }
                 });
@@ -137,10 +145,18 @@ pub(crate) fn show(
                     if ui.button("stop fit").clicked() {
                         events.push(Event::StopFit);
                     }
-                } else if ui.button("fit both").clicked() {
+                } else if ui
+                    .add_enabled(!any_held, egui::Button::new("fit both"))
+                    .on_disabled_hover_text(HELD_HOVER)
+                    .clicked()
+                {
                     events.push(Event::Fit);
                 }
-                if ui.button("reset framing").clicked() {
+                if ui
+                    .add_enabled(!any_held, egui::Button::new("reset framing"))
+                    .on_disabled_hover_text(HELD_HOVER)
+                    .clicked()
+                {
                     events.push(Event::ResetFraming);
                 }
             });
