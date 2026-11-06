@@ -29,10 +29,11 @@ while :; do
 	port_free "$p1" && port_free $((p1 + 1)) && port_free $((p1 + 2)) && break
 done
 p2=$((p1 + 1))
+p3=$((p1 + 2))
 
 mkdir -p "$tmp/stubs" "$tmp/bin" "$tmp/state"
 cat >"$tmp/stubs/stub.py" <<'EOF'
-import os, socket, struct, sys, time
+import os, socket, struct, sys, threading, time
 
 mode = os.path.basename(sys.argv[0]).split("-")[1].rstrip("0123456789")
 args = sys.argv[1:]
@@ -50,6 +51,15 @@ for port in (p1, p2):
     s.bind(("127.0.0.1", port))
     s.listen()
     socks.append(s)
+
+# a receiver's connection, closed by this end when the process dies, is
+# what leaves a port in TIME-WAIT
+conns = []
+def serve(s):
+    while True:
+        conns.append(s.accept()[0])
+for s in socks:
+    threading.Thread(target=serve, args=(s,), daemon=True).start()
 
 os.makedirs(tap, exist_ok=True)
 for name in os.listdir(tap):
@@ -78,6 +88,27 @@ while True:
         sys.exit(1)
     time.sleep(max(0.0, start + seq / fps - time.monotonic()))
 EOF
+# a receiver: holds a connection until the far end closes it
+cat >"$tmp/stubs/client.py" <<'EOF'
+import socket, sys
+
+s = socket.create_connection(("127.0.0.1", int(sys.argv[1])))
+open(sys.argv[2], "w").close()
+while s.recv(1024):
+    pass
+s.close()
+EOF
+# a listener that is not the unit's
+cat >"$tmp/stubs/listener.py" <<'EOF'
+import socket, sys, time
+
+s = socket.socket()
+s.bind(("127.0.0.1", int(sys.argv[1])))
+s.listen()
+open(sys.argv[2], "w").close()
+time.sleep(600)
+EOF
+
 for name in good0 good1 slow wrongport dies; do
 	{
 		printf '#!%s -I\n' "$py"
@@ -106,6 +137,24 @@ done
 	printf 'HEALTH_CMDS=(%q)\n' \
 		"case \$DEPLOY_BIN in */transmog-good0) chmod a-w $tmp/bin $tmp/deploy.log; exit 1 ;; esac"
 } >"$tmp/readonly.env"
+{
+	printf 'source %q\n' "$tmp/deploy.env"
+	printf 'PORT_WAIT_SECS=2\n'
+} >"$tmp/timewait.env"
+{
+	printf 'source %q\n' "$tmp/deploy.env"
+	printf 'NDI_PORTS=%q\n' "$p1 $p2 $p3"
+} >"$tmp/foreign.env"
+
+# waits up to 5 s for FILE
+ready() {
+	local i
+	for ((i = 0; i < 50; i++)); do
+		[[ -e $1 ]] && return 0
+		sleep 0.1
+	done
+	return 1
+}
 
 qa_before=$(systemctl --user show -P MainPID transmog-qa.service 2>/dev/null || true)
 
@@ -180,6 +229,34 @@ check "failed -> good0" points failed good0
 check "unit runs good1 again" running good1
 check "signal named in the log" grep -q 'SIGTERM during the swap to transmog-good0' "$tmp/deploy.log"
 check "log hook saw four rollbacks" [ "$(grep -c '^rolled back' "$tmp/hook.log")" = 4 ]
+
+echo "a listener outside the unit is refused before the stop"
+"$py" -I "$tmp/stubs/listener.py" "$p3" "$tmp/listener.ready" &
+lpid=$!
+ready "$tmp/listener.ready"
+pid_before=$(systemctl --user show -P MainPID "$UNIT.service")
+rc=$(deploy good0 foreign)
+kill "$lpid"
+wait "$lpid" || true
+check "exit 3" [ "$rc" = 3 ]
+check "unit pid unchanged" [ "$(systemctl --user show -P MainPID "$UNIT.service")" = "$pid_before" ]
+check "refusal names the port" grep -q "deploy refused: ports held outside $UNIT (port:pid): $p3:$lpid" "$tmp/hook.log"
+
+echo "a port in TIME-WAIT keeps the new build from starting"
+"$py" -I "$tmp/stubs/client.py" "$p2" "$tmp/client.ready" &
+cpid=$!
+ready "$tmp/client.ready"
+sleep 0.5
+starts=$(grep -c "started on $tmp/bin/transmog-good0" "$tmp/deploy.log" || true)
+rc=$(deploy good0 timewait)
+wait "$cpid" || true
+check "exit 1" [ "$rc" = 1 ]
+check "TIME-WAIT seen on $p2" grep -q "TIME-WAIT .*:$p2 " "$tmp/deploy.log"
+check "good0 never started" [ "$(grep -c "started on $tmp/bin/transmog-good0" "$tmp/deploy.log" || true)" = "$starts" ]
+check "gate note says why" grep -q "ports: $p1 $p2 still busy 2s after the stop, transmog-good0 not started" "$tmp/hook.log"
+check "current -> good1" points current good1
+check "failed -> good0" points failed good0
+check "unit runs good1 again" running good1
 
 echo "rollback with BIN_DIR and the log read-only"
 rc=$(deploy good0 readonly)

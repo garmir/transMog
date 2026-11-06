@@ -360,12 +360,17 @@ deploying machine and on its remote builders.
 
 the unit is one `systemd-run` made, so it disappears when it stops. deploy
 reads its arguments and properties (environment, working directory,
-output) from the transient unit file first, stops it, waits up to 10 s for
-tcp 5960 and 5961 to be free, and starts it again under the same name on
-the new binary. the wait is there because the ndi sdk moves to 5962 while
-an old socket still holds 5961, and the ssh tunnel to TouchDesigner
-carries 5960 and 5961 only. a deploy waits first while `PAUSE_FILE`
-exists.
+output) from the transient unit file first, stops it, waits up to
+`PORT_WAIT_SECS` (65 s) for tcp 5960 and 5961 to be free, and starts it
+again under the same name on the new binary. the wait is there because
+the ndi sdk moves to 5962 while an old socket still holds 5961, and the
+ssh tunnel to TouchDesigner carries 5960 and 5961 only. a socket that had
+a receiver connected stays in TIME-WAIT for 60 s after the stop, which is
+why the default is past that. when the ports are still busy the new
+build is not started and the deploy rolls back; the rollback waits at
+least 65 s too and then starts the previous build regardless. a deploy
+refuses before stopping anything when a process outside the unit listens
+on either port, and it waits first while `PAUSE_FILE` exists.
 
 for `HEALTH_SECS` (20) the gates then check that:
 
@@ -404,5 +409,8 @@ them all.
 `systemd-run` unit whose builds are python stubs: a fake tap at 30 fps,
 two free high ports in place of 5960 and 5961, and a `control.state`. it
 checks a good build, one at 22 fps, one on the wrong port and one that
-dies after 1.5 s, and stops its unit on exit. it builds nothing and checks
-no real camera.
+dies after 1.5 s, then a SIGTERM during the gates, a listener outside the
+unit, a receiver's connection left in TIME-WAIT, and a rollback with
+`BIN_DIR` and the log read-only. the TIME-WAIT case waits out the real
+60 s, so the run takes about 100 s. it stops its unit on exit, builds
+nothing and checks no real camera.

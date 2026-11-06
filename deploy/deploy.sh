@@ -86,7 +86,7 @@ load_env() {
 	: "${STARTUP_SECS:=15}"
 	: "${MIN_FPS:=29}"
 	: "${MAX_SEQ_GAPS:=10}"
-	: "${PORT_WAIT_SECS:=10}"
+	: "${PORT_WAIT_SECS:=65}"
 	: "${NDI_PORTS=5960 5961}"
 	: "${HEALTH_CMD_TIMEOUT:=30}"
 	: "${TAP_DIR:=}"
@@ -243,20 +243,51 @@ ports_busy() {
 	return 1
 }
 
+# Linux keeps a socket that closed first in TIME-WAIT for a fixed 60 s,
+# and a listener without SO_REUSEADDR cannot bind its port until then
+TIME_WAIT_SECS=65
+
+port_sockets() {
+	[[ -n $NDI_PORTS ]] || return 0
+	ss -Htanp | grep -E ":($(tr ' ' '|' <<<"$NDI_PORTS")) " | while IFS= read -r l; do log "  $l"; done || true
+}
+
+# listeners on NDI_PORTS that are not the unit's, by port and pid; a
+# stop does not free those, so the new build would land on another port
+foreign_listeners() {
+	local p line pids pid out=''
+	for p in $NDI_PORTS; do
+		while IFS= read -r line; do
+			[[ -n $line ]] || continue
+			pids=$(grep -o 'pid=[0-9]*' <<<"$line" | cut -d= -f2 | sort -u || true)
+			# ss shows no pid for another user's socket
+			[[ -n $pids ]] || out+=" $p:other-user"
+			for pid in $pids; do in_unit "$pid" || out+=" $p:$pid"; done
+		done < <(ss -Htlnp "( sport = :$p )")
+	done
+	printf '%s' "${out# }"
+}
+
+# stops the unit and waits up to SECS for NDI_PORTS to be free; returns 1
+# when they are still busy. the ndi sdk takes the next free port when 5961
+# is still held, and the ssh tunnel carries only 5960 and 5961
 stop_unit() {
+	local wait=$1
 	unit_status
 	if [[ $U_STATE == active || $U_STATE == activating || $U_STATE == reloading ]]; then
 		run systemctl --user stop "$UNIT.service" || log "stop returned non-zero"
 	fi
 	systemctl --user reset-failed "$UNIT.service" >/dev/null 2>&1 || true
-	# the ndi sdk takes the next free port when 5961 is still held by the
-	# old socket, and the ssh tunnel carries only 5960 and 5961
-	local deadline=$((SECONDS + PORT_WAIT_SECS))
+	local deadline=$((SECONDS + wait))
+	if ports_busy; then
+		log "waiting up to ${wait}s for ports $NDI_PORTS:"
+		port_sockets
+	fi
 	while ports_busy; do
 		if ((SECONDS >= deadline)); then
-			log "ports $NDI_PORTS still in use after ${PORT_WAIT_SECS}s:"
-			ss -Htanp | grep -E ":($(tr ' ' '|' <<<"$NDI_PORTS")) " | while IFS= read -r l; do log "  $l"; done || true
-			return 0
+			log "ports $NDI_PORTS still in use after ${wait}s:"
+			port_sockets
+			return 1
 		fi
 		sleep 0.1
 	done
@@ -437,10 +468,20 @@ gates() {
 	((${#GATE_NOTES[@]} == 0))
 }
 
-# stops the unit, starts it on BIN with the saved arguments, runs the gates
+# stops the unit, starts it on BIN with the saved arguments, runs the gates.
+# the forward swap does not start BIN while the ports are busy. the
+# rollback waits at least past TIME-WAIT and then starts BIN regardless,
+# since a unit on the wrong port is better than none, and the port gate
+# reports it
 swap_to() {
-	local bin=$1
-	stop_unit
+	local bin=$1 wait=$PORT_WAIT_SECS
+	if [[ ${2:-} == rollback ]]; then
+		((wait >= TIME_WAIT_SECS)) || wait=$TIME_WAIT_SECS
+		stop_unit "$wait" || log "starting $(basename "$bin") with the ports still busy"
+	elif ! stop_unit "$wait"; then
+		GATE_NOTES=("ports: $NDI_PORTS still busy ${wait}s after the stop, $(basename "$bin") not started")
+		return 1
+	fi
 	start_unit "$bin" || {
 		GATE_NOTES=("start: systemd-run failed for $bin")
 		return 1
@@ -518,6 +559,11 @@ deploy_bin() {
 		prev=$(readlink "$BIN_DIR/previous")
 	fi
 	[[ -x $prev ]] || refuse "no previous build to fall back to: $prev"
+	unit_status
+	SWAP_PID=$U_PID
+	local foreign
+	foreign=$(foreign_listeners)
+	[[ -z $foreign ]] || refuse "ports held outside $UNIT (port:pid): $foreign"
 
 	summary "deploying $name on $UNIT, fallback $(basename "$prev")"
 	set_link previous "$prev" || refuse "could not link $BIN_DIR/previous"
@@ -545,7 +591,7 @@ roll_back() {
 	local bin=$1 prev=$2 links=ok why
 	set_link failed "$bin" || links=broken
 	set_link current "$prev" || links=broken
-	if swap_to "$prev"; then
+	if swap_to "$prev" rollback; then
 		SWAP_PHASE=finished
 		save_spec_for "$prev"
 		if [[ $links == ok ]]; then
@@ -679,8 +725,8 @@ plan for $UNIT
   fallback   $(if [[ $SPEC_BIN == "$bin" ]]; then readlink "$BIN_DIR/previous" 2>/dev/null || echo none; else echo "$SPEC_BIN"; fi)
   arguments  from $SPEC_FROM
   pause file ${PAUSE_FILE:-unset} ($state)
-  steps      wait for the pause file, stop $UNIT, wait up to ${PORT_WAIT_SECS}s for tcp ${NDI_PORTS:-none} to be free,
-             then: $(printf '%q ' systemd-run --user --unit "$UNIT" "${props[@]}" "$bin" "${SPEC_ARGV[@]}")
+  steps      wait for the pause file, refuse if another process listens on tcp ${NDI_PORTS:-none},
+             stop $UNIT, wait up to ${PORT_WAIT_SECS}s for those ports to be free (else roll back), then: $(printf '%q ' systemd-run --user --unit "$UNIT" "${props[@]}" "$bin" "${SPEC_ARGV[@]}")
   gates      over ${HEALTH_SECS}s: process alive; tap $TAP_DIR >= $MIN_FPS fps, <= $MAX_SEQ_GAPS seq gaps;
              tcp ${NDI_PORTS:-none} held by the new pid; control.state ${CONTROL_STATE:-not checked};
              ${#HEALTH_CMDS[@]} health command(s); then restart ${RESTART_UNITS[*]:-nothing}
