@@ -168,7 +168,8 @@ lines every pass parameter.
 `qa_lock`, on from the start, holds exposure_time_absolute, auto_exposure,
 exposure_dynamic_framerate, gain, focus_absolute,
 focus_automatic_continuous, white_balance_*, power_line_frequency,
-zoom_absolute, pan_absolute and tilt_absolute at the `qa` preset's values.
+zoom_absolute, pan_absolute, tilt_absolute and the Logitech picture
+switches below at the `qa` preset's values.
 the latency ruler decodes stamp cells off the camera picture: a moving
 exposure smears them, and its screen calibration is in camera pixels, so
 digital zoom, pan or tilt moves the cells off their quads. a held key from
@@ -182,6 +183,41 @@ the websocket client is std only and speaks plain `ws://`: text frames,
 pings answered, no tls, and it does not check the server's accept hash. it
 reconnects from 0.5 s to 10 s apart and drops a link that has been silent
 for 5 s.
+
+## logitech controls
+
+the C920 has six vendor extension units that the kernel maps to no v4l2
+control, so v4l2-ctl and guvcview do not see them. transMog finds them by
+GUID in the camera's USB descriptors (sysfs `descriptors`) and reads and
+writes them with uvcvideo's raw `UVCIOC_CTRL_QUERY` on the controls' own
+fd. they show up as ordinary controls under "Logitech Extension Units", so
+the panel, presets, the control file, the websocket and `cam` lines in
+`control.state` all take them by name:
+
+    logitech_led1_mode 0          # off, on, blink, auto
+    logitech_led1_frequency 20    # blink rate in 0.05 Hz steps
+    logitech_rightlight 0
+    logitech_test_gain 0          # 0..3
+    logitech_low_light_priority 0
+    logitech_pixel_defect_correction 3
+    logitech_lens_shading 1       # 0..63
+    logitech_gamma 1              # 0..2
+    logitech_integration_time 0   # the camera reports 10..1000, reads 0
+
+the names are libwebcam's (logitech.xml), the ranges what this C920
+(046d:082d, firmware 0.11) reports, widened to its current value because
+it reads pixel defect correction 3 against a maximum of 2. what each of
+the test and debug switches does to the picture is not measured yet.
+everything but the LED is held by `qa_lock`. only these selectors are
+ever written; the unit's register, EEPROM, sensor and ISP access
+selectors are refused in code. on kernel 7.2 and later the LED needs
+uvcvideo's `allow_privacy_override=1`.
+
+none of these values survive a re-enumeration, and a replugged C920
+comes back with every control at its default. when the capture ends on
+its own, the window tries the same camera every 2 s, then writes back the
+controls as last read and the qa lock's values. stopping or picking a
+device by hand cancels that.
 
 ## aim mode
 

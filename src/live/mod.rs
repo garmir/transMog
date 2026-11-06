@@ -16,21 +16,25 @@ pub mod ws;
 /// the controls the qa preset fixes. the latency ruler decodes stamp
 /// cells off the camera picture and needs the exposure to stay put, and
 /// its screen calibration is in camera pixels, so digital zoom, pan and
-/// tilt would move the cells off their quads
+/// tilt would move the cells off their quads. Logitech's picture
+/// switches (RightLight, gamma, low-light priority and the rest) change
+/// the same cells, so they are held too; the LED is not
 pub fn is_locked(key: &str) -> bool {
-    matches!(
-        key,
-        "exposure_time_absolute"
-            | "zoom_absolute"
-            | "pan_absolute"
-            | "tilt_absolute"
-            | "auto_exposure"
-            | "exposure_dynamic_framerate"
-            | "gain"
-            | "focus_absolute"
-            | "focus_automatic_continuous"
-            | "power_line_frequency"
-    ) || key.starts_with("white_balance_")
+    crate::controls::xu::picture_keys().any(|k| k == key)
+        || matches!(
+            key,
+            "exposure_time_absolute"
+                | "zoom_absolute"
+                | "pan_absolute"
+                | "tilt_absolute"
+                | "auto_exposure"
+                | "exposure_dynamic_framerate"
+                | "gain"
+                | "focus_absolute"
+                | "focus_automatic_continuous"
+                | "power_line_frequency"
+        )
+        || key.starts_with("white_balance_")
 }
 
 /// the preset whose values the lock holds
@@ -325,10 +329,19 @@ mod tests {
             "white_balance_temperature",
             "white_balance_automatic",
             "power_line_frequency",
+            "logitech_rightlight",
+            "logitech_gamma",
+            "logitech_integration_time",
         ] {
             assert!(is_locked(key), "{key}");
         }
-        for key in ["brightness", "contrast", "fisheye_k1", "fisheye_enabled"] {
+        for key in [
+            "brightness",
+            "contrast",
+            "fisheye_k1",
+            "fisheye_enabled",
+            "logitech_led1_mode",
+        ] {
             assert!(!is_locked(key), "{key}");
         }
     }

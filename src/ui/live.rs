@@ -414,8 +414,8 @@ pub(super) fn show(ui: &mut egui::Ui, app: &mut App) {
     if ui
         .checkbox(&mut lock, "qa lock")
         .on_hover_text(
-            "holds exposure, gain, focus, white balance, power line, zoom, pan and tilt \
-             at the qa preset",
+            "holds exposure, gain, focus, white balance, power line, zoom, pan, tilt \
+             and Logitech's picture switches at the qa preset",
         )
         .changed()
     {

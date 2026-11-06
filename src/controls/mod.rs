@@ -9,6 +9,7 @@ use v4l::v4l_sys::{v4l2_ext_control, v4l2_query_ext_ctrl};
 use v4l::Device;
 
 pub mod preset;
+pub mod xu;
 
 // the v4l crate keeps its own v4l2_ext_controls private because bindgen
 // turns the ctrl_class/which union into something it cannot name, so a
@@ -63,12 +64,22 @@ pub struct ControlInfo {
 /// holds its own v4l device fd, safe alongside a capture on the same node
 pub struct Controls {
     device: Device,
+    xu: xu::Xu,
 }
 
 impl Controls {
     pub fn open(path: &Path) -> Result<Controls> {
         let device = Device::with_path(path).with_context(|| format!("open {}", path.display()))?;
-        Ok(Controls { device })
+        let xu = xu::Xu::bind(device.handle().fd(), path);
+        for note in &xu.notes {
+            debug!("{}: {note}", path.display());
+        }
+        Ok(Controls { device, xu })
+    }
+
+    /// why vendor controls were skipped, when some were
+    pub fn notes(&self) -> &[String] {
+        &self.xu.notes
     }
 
     /// all controls in enumeration order with current values
@@ -97,10 +108,14 @@ impl Controls {
                 class: class_name(desc.id).to_string(),
             });
         }
+        out.extend(self.xu.query(self.device.handle().fd()));
         Ok(out)
     }
 
     pub fn set(&self, id: u32, value: i64) -> Result<()> {
+        if xu::is_xu(id) {
+            return self.xu.set(self.device.handle().fd(), id, value);
+        }
         let desc = self.describe(id)?;
         let value = match desc.typ {
             Type::Integer | Type::Integer64 | Type::Menu | Type::IntegerMenu => {
@@ -117,6 +132,9 @@ impl Controls {
 
     /// set to default
     pub fn reset(&self, id: u32) -> Result<()> {
+        if xu::is_xu(id) {
+            return self.set(id, self.xu.default_of(id)?);
+        }
         let desc = self.describe(id)?;
         self.reset_described(&desc)
     }
@@ -133,6 +151,12 @@ impl Controls {
                 continue;
             }
             if let Err(e) = self.reset_described(&current) {
+                debug!("reset_all: {e:#}");
+                first_err.get_or_insert(e);
+            }
+        }
+        for id in self.xu.ids() {
+            if let Err(e) = self.reset(id) {
                 debug!("reset_all: {e:#}");
                 first_err.get_or_insert(e);
             }
@@ -250,6 +274,7 @@ fn class_name(id: u32) -> &'static str {
     match id & CLASS_MASK {
         CLASS_USER => "User Controls",
         CLASS_CAMERA => "Camera Controls",
+        _ if xu::is_xu(id) => xu::CLASS,
         _ => "Other",
     }
 }

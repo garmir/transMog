@@ -6,6 +6,7 @@ mod live;
 mod overlay;
 mod preview;
 mod qa_panel;
+mod reconnect;
 mod rect_view;
 
 use std::path::PathBuf;
@@ -67,6 +68,8 @@ pub struct App {
     rect: Option<Rectify>,
     rect_scale: f32,
     rect_textures: rect_view::Textures,
+    /// the camera to get back after its capture ended on its own
+    reconnect: Option<reconnect::Pending>,
 }
 
 impl App {
@@ -108,6 +111,7 @@ impl App {
             rect: None,
             rect_scale: rect::DEFAULT_SCALE,
             rect_textures: rect_view::Textures::default(),
+            reconnect: None,
         };
         app.status = if app.preview.is_none() {
             "no wgpu render state: the preview needs the wgpu backend".into()
@@ -937,6 +941,7 @@ impl App {
         if plain_r && self.aim_on() && !ui.ctx().egui_wants_keyboard_input() {
             self.set_rectified_view(!self.aim_ui.rectified);
         }
+        self.tick_reconnect();
         self.tick_fit();
         self.tick_live();
 
@@ -944,7 +949,10 @@ impl App {
             if let Some(event) = devices::show_top_bar(ui, self) {
                 match event {
                     devices::Event::Rescan => self.rescan(),
-                    devices::Event::SelectDevice(i) => self.select_device(i),
+                    devices::Event::SelectDevice(i) => {
+                        self.reconnect = None;
+                        self.select_device(i);
+                    }
                     devices::Event::Select(selection) => {
                         self.selection = selection;
                         if self.capture.is_some() {
@@ -953,6 +961,7 @@ impl App {
                     }
                     devices::Event::Aim => self.set_aim(!self.aim_on()),
                     devices::Event::Toggle => {
+                        self.reconnect = None;
                         if self.capture.is_some() {
                             self.stop();
                             self.status = "stopped".into();
